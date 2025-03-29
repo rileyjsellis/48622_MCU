@@ -22,7 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-//INITIAL TEST, Let's see if this uploads!
+// Initial repo test!! Hello team!
 
 /* USER CODE END Includes */
 
