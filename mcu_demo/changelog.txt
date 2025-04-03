@@ -1,0 +1,19 @@
+//////////////////////////////////
+
+NOTES TO TEAM:
+
+STATE MACHINE IS CREATED (with features lacking)
+
+- onboard button swaps between states a and b
+- external button toggles LED blinking, and moves to state C
+
+- state C process is incomplete.
+
+COMPLETED:
+- STATE MACHINE A B C setup
+- LED toggle functionality and pushbuttons
+
+REMAINING:
+- LCD & I2C
+- UART Communication
+- TIM3 SERVO
