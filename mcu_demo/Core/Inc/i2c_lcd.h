@@ -1,20 +1,15 @@
 #ifndef I2C_LCD_H
 #define I2C_LCD_H
-#include <stdint.h>
-#include "stm32g0xx_hal.h"
+
 /**
  * @brief Includes the HAL driver present in the project
  */
-#if defined(STM32F1xx)
-  #include "stm32f1xx_hal.h"
-#elif defined(STM32C0xx)
-  #include "stm32c0xx_hal.h"
-#elif defined(STM32G4xx)
-  #include "stm32g4xx_hal.h"
-#elif defined(STM32G0xx)
-  #include "stm32g0xx_hal.h"
-#else
-  #include "stm32g0xx_hal.h"  // default to G0 series if unsure
+#if __has_include("stm32f1xx_hal.h")
+	#include "stm32f1xx_hal.h"
+#elif __has_include("stm32c0xx_hal.h")
+	#include "stm32c0xx_hal.h"
+#elif __has_include("stm32g0xx_hal.h")
+	#include "stm32g0xx_hal.h"
 #endif
 
 /**
