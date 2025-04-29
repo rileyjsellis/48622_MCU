@@ -18,10 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c_lcd.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-// Christina comment update comment new
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,6 +32,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// include setup for pins PB7 for SDA and PB6 for SCL
+#define SDA_PORT GPIOB
+#define SDA_PIN 7
+#define SCL_PORT GPIOB
+#define SCL_PIN 6
 
 /* USER CODE END PD */
 
@@ -54,14 +60,31 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/*LINEAR MAPPING
- * this exists for the input ADC value to be mapped to the
- * minimum and maximum of the servo motor PWM, 180 degrees rotation.
- */
-int map(int x, int in_min, int in_max, int out_min, int out_max){
-	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin) {
+
+    // 1. Enable GPIO clock (based on port address offset from GPIOA)
+
+    uint32_t portIndex = ((uint32_t)port - (uint32_t)GPIOA) / 0x400;
+    RCC->IOPENR |= (1 << portIndex);
+
+    // 2. Set pin as general purpose output (MODER = 01)
+
+    port->MODER &= ~(3 << (pin * 2)); // clear mode bits
+    port->MODER |=  (1 << (pin * 2)); // set to output mode
+
+    // 3. Set push-pull, low speed, no pull
+
+    port->OTYPER &= ~(1 << pin);      // push-pull
+    port->OSPEEDR &= ~(3 << (pin * 2)); // low speed
+    port->PUPDR &= ~(3 << (pin * 2)); // no pull-up/down
 }
-//RILEY: additional comment here, this will be used for the servo and LED
+
+void InitAll(){
+
+	// GPIO outputs
+	ConfigureGpioOutput(SDA_PORT, SDA_PIN); // SDA
+	ConfigureGpioOutput(SCL_PORT, SCL_PIN); // SCL
+}
 
 /* USER CODE END 0 */
 
@@ -73,86 +96,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-	/* ----------------------------------
-	 * -- INITIAL STATE MACHINE LAYOUT --
-	 * ---------------------------------- */
-	/* RILEY: comments for team,
-	 * I'm just sketching out the initial layout,
-	 * and then we'll work on building each element.
-	 */
-
-	//STATE MACHINE A, B, C
-
-	/*
-	 * STATE CHANGE SYSTEM
-	 */
-
-	//Pushbutton 1
-	//In A, sets state to C (advanced)
-	//In B, performs task
-
-	//Pushbutton 2
-	//In A, sets state to B
-	//In B, sets state to A
-
-	/*
-	 * STATE A, state 0
-	 */
-	//LCD:
-	//"SID: 14057208" (1st line)
-	//"MECHATRONICS 1" (2nd line)
-
-	//UART
-	//"Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX"
-
-	//Pressing keyboard input will toggle transmission.
-
-	/*
-	 * STATE B, state 1
-	 */
-	//LCD:
-	//"ADC: xxxx STATE B" (1st line)
-	//"MECHATRONICS 1" (2nd line)
-
-
-	//PUSHBUTTON 1: (within state 2)
-	//if btn1 released
-	//LED1 blinks 1Hz, LED2 OFF.
-
-	//if btn1 PRESSED
-	//LED1 OFF, LED2 blinks 1Hz
-
-	//Potentiometer:
-	//change blinking freq of LED3 (with mapping)
-	//rotates the servo motor
-
-
-	/*
-	 * STATE C, state 2
-	 */
-	//THIS HAS SEQUENTIAL LOGIC
-	//states within state.
-
-	//2.0
-	//UART TX pin using registers to general output
-
-	//2.1
-	//pin flash LED 3 times at 1Hz
-
-	//2.2
-	//after flashing, UART TX reconfigured to enable
-	//UART communication
-
-	//2.3
-	//return to state A
-
-
-
-
-
-
-
-
 
   /* USER CODE END 1 */
 
@@ -174,6 +117,19 @@ int main(void)
 
   /* Initialize all configured peripherals */
   /* USER CODE BEGIN 2 */
+  InitAll();
+
+  I2C_HandleTypeDef hi2c1;
+  I2C_LCD_HandleTypeDef lcd1;
+
+      lcd1.hi2c = &hi2c1;     // hi2c1 is your I2C handler
+      lcd1.address = 0x27 << 1;    // I2C address for the first LCD
+      lcd_init(&lcd1);        // Initialize the first LCD
+
+      lcd_clear(&lcd1);
+      lcd_puts(&lcd1, "STM32 I2C LCD");
+      lcd_gotoxy(&lcd1, 0, 1);
+      lcd_puts(&lcd1, "Library Demo");
 
   /* USER CODE END 2 */
 
