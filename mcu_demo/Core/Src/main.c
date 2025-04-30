@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "i2c_lcd.h"
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -41,16 +42,25 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
-
+volatile uint32_t ADC_Val = 0;
+volatile uint32_t Dis_Val = 0;
+char ADC_Str[17]; // character array where string will be formatted to be stored
+I2C_LCD_HandleTypeDef lcd1;
+uint32_t map(uint32_t val, uint32_t min_fm, uint32_t max_fm, uint32_t min_to, uint32_t max_to) {
+   return (val - min_fm) * (max_to - min_to) / (max_fm - min_fm) + min_to;
+}
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -90,18 +100,27 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-
-  I2C_LCD_HandleTypeDef lcd1;
 
   lcd1.hi2c = &hi2c1;
   lcd1.address = 0x27 << 1;
   lcd_init(&lcd1);
-
   lcd_clear(&lcd1);
-  lcd_puts(&lcd1, "SID:25261266");
-  lcd_gotoxy(&lcd1, 0, 1);
-  lcd_puts(&lcd1, "MECHATRONICS 1");
+
+  HAL_ADC_Start_IT(&hadc1);
+
+  // State A
+  //lcd_clear(&lcd1);
+  //lcd_puts(&lcd1, "SID:25261266");
+  //lcd_gotoxy(&lcd1, 0, 1);
+  //lcd_puts(&lcd1, "MECHATRONICS 1");
+
+  // State B
+
+  //lcd_puts(&lcd1, "ADC:     STATE B");
+  //lcd_gotoxy(&lcd1, 0, 1);
+  //lcd_puts(&lcd1, "MECHATRONICS 1");
 
   /* USER CODE END 2 */
 
@@ -112,6 +131,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+	  HAL_Delay(500);
+
   }
   /* USER CODE END 3 */
 }
@@ -154,6 +176,65 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.LowPowerAutoPowerOff = DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc1.Init.SamplingTimeCommon1 = ADC_SAMPLETIME_12CYCLES_5;
+  hadc1.Init.SamplingTimeCommon2 = ADC_SAMPLETIME_12CYCLES_5;
+  hadc1.Init.OversamplingMode = DISABLE;
+  hadc1.Init.TriggerFrequencyMode = ADC_TRIGGER_FREQ_HIGH;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLINGTIME_COMMON_1;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -215,6 +296,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -222,6 +304,26 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+  if (hadc->Instance == ADC1)
+  {
+    ADC_Val = HAL_ADC_GetValue(hadc);
+    Dis_Val = map(ADC_Val, 150, 4095, 0, 4095);
+    // Update LCD
+    // %4lu formats ADC Val in unsigned long integer format with 4 digit length
+    sprintf(ADC_Str, "ADC:%4lu STATE B", Dis_Val); // sprintf used to generate string with updated value
+    lcd_gotoxy(&lcd1, 0, 0);
+    lcd_puts(&lcd1, ADC_Str);
+
+    lcd_gotoxy(&lcd1, 0, 1);
+    lcd_puts(&lcd1, "MECHATRONICS 1");
+
+    // Restart ADC conversion
+    HAL_ADC_Start_IT(hadc);
+  }
+}
 
 /* USER CODE END 4 */
 
