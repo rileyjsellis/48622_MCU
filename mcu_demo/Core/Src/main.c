@@ -542,7 +542,7 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 }
-
+//TEST
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
