@@ -48,6 +48,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	  * 20ms/20000 = 0.001ms = 1us per tick.
 	  */
 
+	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
+	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
+	// if it's showing up weirdly on your own servo.
+
 	 /* DUTY CYCLE LOWER: 0 DEGREES
 	  * 0.61ms = 610us
 	  * datasheet: 0.05 of PWM Period
@@ -67,15 +71,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	 int32_t pot_max = 4095;
 
   	  /* ----------------------------
-  	  *  ACTIVITY 3:
+  	  *  ACTIVITY 3: MCU 3
   	  *  Potentiometer to Control a Servo Motor
   	  *  ----------------------------
   	  */
-	 else {
-		 pwm_val = map(adc_value,pot_min,pot_max,serv_min,serv_max);
-		 //time for servo to react to new input
-		 counter++;
-	 }
+	 
+	 pwm_val = map(adc_value,pot_min,pot_max,serv_min,serv_max);
+	 //time for servo to react to new input
+	 counter++;
 
 	 /* HAL_TIM_SET_COMPARE, setting CCR to the new PWM duty cycle value
 	  * Set the TIM Capture Compare Register value on runtime
