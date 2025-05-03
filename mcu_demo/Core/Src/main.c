@@ -18,12 +18,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <stdio.h>
-#include <string.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include "i2c_lcd.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,6 +73,10 @@ typedef enum {
 #define POT_PORT GPIOA
 #define POT_PIN 0
 
+
+//LCD
+#define LCD_REFRESH_PERIOD 50 //ms
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -81,9 +85,12 @@ typedef enum {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+I2C_LCD_HandleTypeDef lcd1;
 
 volatile SystemState currentState = STATE_A;
 
@@ -126,12 +133,22 @@ volatile int32_t isTransmitting = 1;
 volatile int32_t uartCounter = 0;
 volatile int8_t uartTransmitFlag = 0;
 
+
+/***********************
+ *  ALL LCD VARIABLES
+ ***********************
+ */
+
+volatile int8_t lcdUpdateFlag = 0;
+volatile int32_t lcdCounter = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* Declare all functions here, rather than relying on
@@ -147,6 +164,9 @@ void ConfigureTimer(TIM_TypeDef* tim, uint32_t prescaler,
 void HandleStateA(void);
 void HandleStateB(void);
 void HandleStateC(void);
+
+void ConfigureTxForUart(void);
+void ConfigureTxForGpio(void);
 
 int MapLinear(int x, int in_min, int in_max, int out_min, int out_max);
 
@@ -167,22 +187,42 @@ void TransmitWithADC(void){
 	char messageWithAdc [100];
 	if (!uartTransmitFlag) return; //immediate exit if no transmission
 
-	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %d\r\n", adcValue);
+	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %lu\r\n", adcValue);
 
-	if(HAL_UART_Transmit(&huart2, messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
+	if(HAL_UART_Transmit(&huart2, (uint8_t*)messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
 		 Error_Handler();
+	//Riley's note:
+	// 'uint8_t*) included to remove warning. signedness differed.
+	// removed warning without changing variable type.
 
 	uartTransmitFlag = 0; //clear flag after successful transmit
 
 }
 
+////LCD Functionality
+
+void OutputLCD(const char* line1, const char* line2) {
+	if(!lcdUpdateFlag)return; //prevents endless refresh
+    lcd_clear(&lcd1);
+
+    lcd_gotoxy(&lcd1, 0, 0);
+    lcd_puts(&lcd1, line1);
+
+    lcd_gotoxy(&lcd1, 0, 1);
+    lcd_puts(&lcd1, line2);
+    lcdUpdateFlag = 0;
+}
+
 void HandleStateA(void) {
 	// To do: Display LCD SID
-		//displayLcdSid(); // shows SID and course name
+
+	// LCD STATE A
+	OutputLCD("SID: 14057208", "MECHATRONICS 1");
+
 	// UART Receiving (only in State A)
-	HAL_UART_Receive_IT(&huart2, rxData, sizeof(rxData));
+	HAL_UART_Receive_IT(&huart2, (const char*)rxData, sizeof((const char*)rxData));
 	// UART Transmitting
-	configureTxForUart();
+	ConfigureTxForUart();
     TransmitWithADC();
 
     if (ButtonPressed(BUTTON1)) {
@@ -198,12 +238,18 @@ void HandleStateA(void) {
 }
 
 void HandleStateB(void) {
+
 	// ADC updates adcValue in ISR
 	// led_period[1] (for LED3 PWM blink) already updated in ADC ISR
 
-    //displayLcdAdc(adcValue);      // shows ADC value
     //updateLed3Blinking(adcValue); // update blink rate
     //rotateServo(adcValue);        // update PWM for servo
+
+	//LCD ALL FUNCTIONALITY
+	char adcText[17];
+	snprintf(adcText, sizeof(adcText), "ADC:%4lu STATE B", adcValue);
+
+	OutputLCD(adcText, "MECHATRONICS 1");
 
     if (buttonPressed[BUTTON1]) {
         ledToggle = 1; //Switch between LED1 and LED2 blinking
@@ -220,7 +266,9 @@ void HandleStateB(void) {
 
 void HandleStateC(void) {
 	 static uint8_t started = 0;
-	 configureTxForGpio();
+	 ConfigureTxForGpio();
+
+	 OutputLCD("", "");
 
 	if (!started) {
 		started = 1;
@@ -241,7 +289,7 @@ void HandleStateC(void) {
  * EXTENSION, UART OR GPIO
  * ***********************
  */
-void configureTxForUart(void) {
+void ConfigureTxForUart(void) {
     if (pc4CurrentMode == PC4_MODE_UART) return; // already UART, skip
 
     HAL_GPIO_DeInit(GPIOC, GPIO_PIN_4);  // Release PC4 from any previous GPIO mode
@@ -253,7 +301,7 @@ void configureTxForUart(void) {
     pc4CurrentMode = PC4_MODE_UART;
 }
 
-void configureTxForGpio(void) {
+void ConfigureTxForGpio(void) {
     if (pc4CurrentMode == PC4_MODE_GPIO) return; // already GPIO, skip
 
     HAL_UART_DeInit(&huart2);  // Disable UART, free PC4
@@ -283,9 +331,22 @@ void TIM2_IRQHandler(void){
 
     static uint16_t period = 1000;
 
-    //UART Counter for Transmission
+    /* ***********************
+	 * LCD Counter for Refresh
+	 * ***********************
+	 */
+    lcdCounter++;
+	if (lcdCounter > LCD_REFRESH_PERIOD -1){
+		lcdUpdateFlag = 1;
+		lcdCounter = 0;
+	}
+
+    /* *****************************
+     * UART Counter for Transmission
+     * *****************************
+     */
     uartCounter++;
-    if (uartCounter > 499
+    if (uartCounter > 499 //specified output frequency 500ms.
     		&& currentState == STATE_A
 			&& isTransmitting){
     	uartTransmitFlag = 1;
@@ -344,6 +405,15 @@ void TIM2_IRQHandler(void){
 
     // Reset counter when full period completes
 	counter[0] = (counter[0] + 1) % period;
+}
+
+void configure_LCD(void){
+	MX_I2C1_Init(); // CubeMX-generated
+
+	lcd1.hi2c = &hi2c1;
+	lcd1.address = 0x27 << 1;  // (confirm your backpack's address, usually 0x27 or 0x3F)
+	lcd_init(&lcd1);
+	lcd_clear(&lcd1);
 }
 
 void ADC1_COMP_IRQHandler(void){
@@ -524,6 +594,9 @@ void InitAll(){
 
 	// TIM
 	ConfigureTimer(TIM2, 16 - 1, 1000 - 1, TIM2_IRQn, 3); //All LEDs
+
+	//LCD
+	configure_LCD();
 }
 
 /* USER CODE END 0 */
@@ -558,6 +631,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   InitAll();
 
@@ -623,6 +697,54 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x00503D58;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -708,8 +830,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   char toggleMessage [] = "UART output toggled with E key. \r\n";
 
   //strcasecmp means the key will activate for 'e' and 'E'
+  // const char to remove warning as strcasecmp expects const char.
   // - Riley
-  if (!strcasecmp(rxData, "e")){
+  if (!strcasecmp((const char*)rxData, "e")){
       isTransmitting = !isTransmitting;
 	  HAL_UART_Transmit(&huart2, (uint8_t*)toggleMessage, strlen(toggleMessage), HAL_MAX_DELAY);
   }
