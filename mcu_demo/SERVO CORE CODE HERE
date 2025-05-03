@@ -1,0 +1,84 @@
+WORKING SERVO CODE HERE:
+
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+
+//for code review
+volatile int32_t activity = 3; //start on 3, can edit in live expressions
+volatile int32_t counter = 0;
+volatile int32_t hal_delay = 1;
+
+//potentiometer
+volatile int32_t adc_value = 0;
+
+//for servo, 47 as minimum is explained below
+volatile int32_t pwm_val = 470; //for activity 2 sweeping!
+volatile int32_t direction = 0; // to be treated as boolean
+
+volatile int32_t counter_test = 0;
+
+//TO PUT INTO USER CODE BEGIN 0
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+	  if (htim->Instance == TIM2){
+		  // Toggle GIPO Pin Using HAL Libraries.
+		  if (activity == 3){
+			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
+		  }
+		  else {
+			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8,GPIO_PIN_RESET);
+		  }
+	  }
+	  counter_test++;
+}
+
+
+//USER LINEAR MAP / MAP
+
+//IN WHILE, USER CODE BEGIN 3
+
+/* USER CODE BEGIN 3 */
+	 HAL_ADC_Start(&hadc1); //for ADC potentiometer
+
+	 // Read ADC value from PA0 (0-4095)
+	 adc_value = HAL_ADC_GetValue(&hadc1);
+
+	 /* Relevant Values
+	  * PWM Period is 50Hz, 20ms with resolution of 2000 ticks.
+	  * 20ms/20000 = 0.001ms = 1us per tick.
+	  */
+
+	 /* DUTY CYCLE LOWER: 0 DEGREES
+	  * 0.61ms = 610us
+	  * datasheet: 0.05 of PWM Period
+	  * actual: ~0.03 of PWM Period
+	  */
+	 int32_t serv_min = 610;
+
+	 /* DUTY CYCLE UPPER: 180 DEGREES
+	  * 2.60ms = 2450us
+	  * datasheet: 0.10 of PWM Period
+	  * actual: ~0.13 of PWM Period for this servo
+	  */
+	 int32_t serv_max = 2600;
+
+	 //POTENTIOMETER MIN & MAX
+	 int32_t pot_min = 70;
+	 int32_t pot_max = 4095;
+
+  	  /* ----------------------------
+  	  *  ACTIVITY 3:
+  	  *  Potentiometer to Control a Servo Motor
+  	  *  ----------------------------
+  	  */
+	 else {
+		 pwm_val = map(adc_value,pot_min,pot_max,serv_min,serv_max);
+		 //time for servo to react to new input
+		 counter++;
+	 }
+
+	 /* HAL_TIM_SET_COMPARE, setting CCR to the new PWM duty cycle value
+	  * Set the TIM Capture Compare Register value on runtime
+	  * without calling another time ConfigChannel function
+	  */
+	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
