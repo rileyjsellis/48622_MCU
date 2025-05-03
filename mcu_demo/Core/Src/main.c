@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdio.h>
+#include <string.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -37,6 +39,12 @@ typedef enum {
 	STATE_B = 1,
 	STATE_C = 2
 }  SystemState;
+
+typedef enum {
+    PC4_MODE_UNKNOWN,
+    PC4_MODE_UART,
+    PC4_MODE_GPIO
+} Pc4Mode;
 
 /* USER CODE END PTD */
 
@@ -73,6 +81,7 @@ typedef enum {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
@@ -103,10 +112,26 @@ volatile uint32_t cState = 0;       // 0 = OFF, 1 = ON
 volatile uint32_t ledBlinkCounter = 0;  // Count OFF states (each full flash = 1)
 volatile uint32_t ledDone = 0;        // Flag when 3 flashes complete
 
+/***********************
+ *  ALL UART VARIABLES
+ ***********************
+ */
+volatile Pc4Mode pc4CurrentMode = PC4_MODE_UNKNOWN;
+
+//transmit data variable
+volatile char txData [] = "Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX\r\n";
+volatile char rxData [] = "";
+
+volatile int32_t isTransmitting = 1;
+volatile int32_t uartCounter = 0;
+volatile int8_t uartTransmitFlag = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* Declare all functions here, rather than relying on
@@ -116,7 +141,7 @@ void SystemClock_Config(void);
 void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin);
 void ConfigureAdc(void);
 void ConfigureButtonEXTI(void);
-void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
+void ConfigureTimer(TIM_TypeDef* tim, uint32_t prescaler,
 		uint32_t arr, IRQn_Type irqNum, uint8_t priority);
 
 void HandleStateA(void);
@@ -137,15 +162,28 @@ uint8_t ButtonPressed(uint8_t buttonIndex){
 	}
 	return 0; // No new press
 }
+//FOR STATE A UART
+void TransmitWithADC(void){
+	char messageWithAdc [100];
+	if (!uartTransmitFlag) return; //immediate exit if no transmission
+
+	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %d\r\n", adcValue);
+
+	if(HAL_UART_Transmit(&huart2, messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
+		 Error_Handler();
+
+	uartTransmitFlag = 0; //clear flag after successful transmit
+
+}
 
 void HandleStateA(void) {
 	// To do: Display LCD SID
 		//displayLcdSid(); // shows SID and course name
-
-	// To do: Transmit UART if uartEnabled
-    if (uartEnabled) {
-        //transmitUart(adcValue); // send UART string every 500ms
-    }
+	// UART Receiving (only in State A)
+	HAL_UART_Receive_IT(&huart2, rxData, sizeof(rxData));
+	// UART Transmitting
+	configureTxForUart();
+    TransmitWithADC();
 
     if (ButtonPressed(BUTTON1)) {
 		currentState = STATE_C;
@@ -182,6 +220,7 @@ void HandleStateB(void) {
 
 void HandleStateC(void) {
 	 static uint8_t started = 0;
+	 configureTxForGpio();
 
 	if (!started) {
 		started = 1;
@@ -198,6 +237,39 @@ void HandleStateC(void) {
 	}
 }
 
+/* ***********************
+ * EXTENSION, UART OR GPIO
+ * ***********************
+ */
+void configureTxForUart(void) {
+    if (pc4CurrentMode == PC4_MODE_UART) return; // already UART, skip
+
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_4);  // Release PC4 from any previous GPIO mode
+
+    MX_USART2_UART_Init(); // CubeMX-generated USART1 initializer (re-init UART and PC4 alternate function)
+
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
+
+    pc4CurrentMode = PC4_MODE_UART;
+}
+
+void configureTxForGpio(void) {
+    if (pc4CurrentMode == PC4_MODE_GPIO) return; // already GPIO, skip
+
+    HAL_UART_DeInit(&huart2);  // Disable UART, free PC4
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    pc4CurrentMode = PC4_MODE_GPIO;
+}
+
 /*LINEAR MAPPING
  * this exists for the input ADC value to be mapped to the
  * minimum and maximum of the servo motor PWM, 180 degrees rotation.
@@ -210,6 +282,15 @@ void TIM2_IRQHandler(void){
     TIM2->SR &= ~TIM_SR_UIF; // Clear update interrupt flag
 
     static uint16_t period = 1000;
+
+    //UART Counter for Transmission
+    uartCounter++;
+    if (uartCounter > 499
+    		&& currentState == STATE_A
+			&& isTransmitting){
+    	uartTransmitFlag = 1;
+    	uartCounter = 0;
+    }
 
     // --- LED1/2 handling (State B) ---
     if (currentState == STATE_B) {
@@ -451,7 +532,11 @@ void InitAll(){
   * @brief  The application entry point.
   * @retval int
   */
-int main(void){
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -471,6 +556,8 @@ int main(void){
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   InitAll();
 
@@ -482,27 +569,22 @@ int main(void){
   while (1){
     /* USER CODE END WHILE */
 
-	/* Switch is the most ideal way to ensure that we remain
-	 * in a clear state system. default state exists as error
-	 * correction.
-	 * - Riley
-	 */
+    /* USER CODE BEGIN 3 */
 
-	 switch (currentState){
+	switch (currentState){
 
-	 	 case STATE_A: HandleStateA(); break;
+		case STATE_A: HandleStateA(); break;
 
-	 	 case STATE_B: HandleStateB(); break;
+		case STATE_B: HandleStateB(); break;
 
-	 	 case STATE_C: HandleStateC(); break;
+		case STATE_C: HandleStateC(); break;
 
-	 	 default:	currentState = STATE_A; break;
-	 }
-
-	/* USER CODE BEGIN 3 */
-	/* USER CODE END 3 */
-  	}
+		default:	currentState = STATE_A; break;
+		}
+	}
+  /* USER CODE END 3 */
 }
+
 /**
   * @brief System Clock Configuration
   * @retval None
@@ -543,7 +625,96 @@ void SystemClock_Config(void)
   }
 }
 
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_EVEN;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
+}
+
 /* USER CODE BEGIN 4 */
+
+// This function has been moved to main.c
+// Purpose is called when key press triggers interrupt.
+// - Riley
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  /* Prevent unused argument(s) compilation warning */
+  UNUSED(huart);
+
+  /* NOTE : This function should not be modified, when the callback is needed,
+            the HAL_UART_RxCpltCallback can be implemented in the user file.
+   */
+
+  //Echoing user input for the purpose of debugging
+  char toggleMessage [] = "UART output toggled with E key. \r\n";
+
+  //strcasecmp means the key will activate for 'e' and 'E'
+  // - Riley
+  if (!strcasecmp(rxData, "e")){
+      isTransmitting = !isTransmitting;
+	  HAL_UART_Transmit(&huart2, (uint8_t*)toggleMessage, strlen(toggleMessage), HAL_MAX_DELAY);
+  }
+
+}
 
 /* USER CODE END 4 */
 
