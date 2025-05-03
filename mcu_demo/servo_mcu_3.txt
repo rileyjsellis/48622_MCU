@@ -1,5 +1,28 @@
 WORKING SERVO CODE HERE:
 
+//******************************
+* TIM3 setup amounts (for MX .ioc)
+*
+*///////////////////////////////
+*
+//TIM3
+Prescaler 16-1
+Counter Mode Up
+Counter Period 20000-1
+Internal Clock No division
+Auto reload disable
+NVIC TIM3 global interrupt enabled
+
+//TIM2
+Prescaler 16000-1
+Counter Mode Up
+Counter Period 500-1
+Internal Clock No Division
+Auto-reload Disable
+NVIC TIM2 global interrupt enabled
+
+
+
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
