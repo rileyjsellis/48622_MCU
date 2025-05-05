@@ -573,6 +573,7 @@ int main(void)
 	  	  * Set the TIM Capture Compare Register value on runtime
 	  	  * without calling another time ConfigChannel function
 	  	  */
+	  	 //RILEY's DEBUG, this needs to be called (along with most of WHILE LOOP) in TIM3 Handler for servo functionality.
 	  	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
   }
   /* USER CODE END 3 */
