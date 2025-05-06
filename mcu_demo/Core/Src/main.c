@@ -43,21 +43,45 @@ typedef enum {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-//ALL LEDs
+/* *************
+ *  USART (TX/RX)
+ * *************
+ */
+
+// TX PA_2 (USART2_TX)
+// RX PA_15 (USART2_RX)
+
+/* *************
+ *  LCD (I2C)
+ * *************
+ */
+// SDA = PB_7
+// SCL = PB_6
+
+/* *********
+ *  ALL LEDs
+ * *********
+ */
 #define LED1_PORT GPIOB
-#define LED1_PIN 4
+#define LED1_PIN 4 //CN9_D5
 #define LED2_PORT GPIOB
-#define LED2_PIN 5
+#define LED2_PIN 5 //CN9_D4
 #define LED3_PORT GPIOB
-#define LED3_PIN 3
+#define LED3_PIN 3 //CN9_D3
 
-#define BUTTON1_PIN 4
-#define BUTTON2_PIN	13
-
+/* *********
+ *  BUTTONS
+ * *********
+ */
+#define BUTTON1_PIN 4 //OFFBOARD PC_4, CN9_D1, CN10_ aligned with CN9's TX/D1
+#define BUTTON2_PIN	13 //ONBOARD, PC_13, CN7 aligned with gap in CN8 and CN6
 #define BUTTON1 0
 #define BUTTON2 1
 
-//TIMER
+/* *********
+ *  TIMERS
+ * *********
+ */
 #define TIMER_SEL TIM2
 #define TIMER_IRQn TIM2_IRQn
 
@@ -90,18 +114,19 @@ volatile uint32_t debugCounter[4] = {0};
 volatile uint32_t debugEXTIcr3 = 0;
 volatile uint32_t lastDebounceTime = 0;
 
-volatile uint32_t buttonPressed[2]= {0};
+volatile uint32_t lastPressTime[2] = {0,0};
+volatile uint32_t lastReleaseTime[2] = {0,0};
+const uint32_t debounceDelay = 30; //ms
+volatile uint32_t buttonState[2]= {0};
 
 volatile uint32_t uartEnabled = 1;
-volatile uint32_t ledToggle = 0;
+volatile uint32_t selectedLed = 0;
 volatile uint32_t ledOn = 0;
 volatile uint32_t ledOff = 1;
 
 volatile uint32_t blink = 0;
 
 volatile uint32_t adcValue = 0;
-
-volatile uint32_t whichLedToggled = 1;
 
 volatile uint32_t cState = 0;       // 0 = OFF, 1 = ON
 volatile uint32_t ledBlinkCounter = 0;  // Count OFF states (each full flash = 1)
@@ -152,26 +177,43 @@ int MapLinear(int x, int in_min, int in_max, int out_min, int out_max);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-uint8_t ButtonPressed(uint8_t buttonIndex){
-	if (buttonPressed[buttonIndex]) {
-		buttonPressed[buttonIndex] = 0;
-		return 1; //button press is new and valid
+/* ****************************
+ * ******* BUTTON LOGIC *******
+ * ****************************/
+
+// This function is called when button PRESS matters,
+// not button being HELD.
+// For swapping between states.
+uint8_t ButtonWasPressed(uint8_t buttonIndex){
+	if (buttonState[buttonIndex]) {
+		buttonState[buttonIndex] = 0; //clears press flag
+		return 1; //returns TRUE, recent button press HAS occurred.
 	}
 	return 0; // No new press
 }
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-	  if (htim->Instance == TIM2){
-		  // Toggle GPIO Pin Using HAL Libraries.
-		  if (activity == 3){
-			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
-		  }
-		  else {
-			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8,GPIO_PIN_RESET);
-		  }
-	  }
-	  counter_test++;
+void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
+    if (isFalling) {
+        buttonState[button] = 1;  // Button is now pressed
+        EXTI->FPR1 = (1 << pin);   // Clear falling edge flag
+    } else {
+        buttonState[button] = 0;  // Button is now released
+        EXTI->RPR1 = (1 << pin);   // Clear rising edge flag
+    }
 }
+
+void EXTI4_15_IRQHandler(void){
+
+    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13);
+    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13);
+
+    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4);
+    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4);
+}
+
+/* ****************************
+ * ***** STATE MACHINE ********
+ * ****************************/
 
 void HandleStateA(void) {
 	// To do: Display LCD SID
@@ -182,12 +224,12 @@ void HandleStateA(void) {
         //transmitUart(adcValue); // send UART string every 500ms
     }
 
-    if (ButtonPressed(BUTTON1)) {
+    if (ButtonWasPressed(BUTTON1)) {
 		currentState = STATE_C;
 		debugCounter[2];
 		return;
 	}
-    if (ButtonPressed(BUTTON2)) {
+    if (ButtonWasPressed(BUTTON2)) {
         currentState = STATE_B;
         counter[0] = 0;
         return;
@@ -202,15 +244,14 @@ void HandleStateB(void) {
     //updateLed3Blinking(adcValue); // update blink rate
     //rotateServo(adcValue);        // update PWM for servo
 
-    if (buttonPressed[BUTTON1]) {
-        ledToggle = 1; //Switch between LED1 and LED2 blinking
+    if (buttonState[BUTTON1]) {
+        selectedLed = 1; //LED2 blinks while button is held
     }
     else{
-    	ledToggle = 0;
+    	selectedLed = 0; //LED1 blinks otherwise
     }
-    if (ButtonPressed(BUTTON2)) {
+    if (ButtonWasPressed(BUTTON2)) {
         currentState = STATE_A;
-        debugCounter[2];
         return;
     }
 }
@@ -233,6 +274,62 @@ void HandleStateC(void) {
 	}
 }
 
+/* ****************************
+ * ***** SERVO MOVING  ********
+ * ****************************/
+
+void ServoMove(void){
+
+	 HAL_ADC_Start(&hadc1); //for ADC potentiometer
+
+	 // Read ADC value from PA0 (0-4095)
+	 adc_value = HAL_ADC_GetValue(&hadc1);
+
+	 /* Relevant Values
+	  * PWM Period is 50Hz, 20ms with resolution of 2000 ticks.
+	  * 20ms/20000 = 0.001ms = 1us per tick.
+	  */
+
+	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
+	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
+	// if it's showing up weirdly on your own servo.
+
+	 /* DUTY CYCLE LOWER: 0 DEGREES
+	  * 0.61ms = 610us
+	  * datasheet: 0.05 of PWM Period
+	  * actual: ~0.03 of PWM Period
+	  */
+	 int32_t serv_min = 610;
+
+	 /* DUTY CYCLE UPPER: 180 DEGREES
+	  * 2.60ms = 2450us
+	  * datasheet: 0.10 of PWM Period
+	  * actual: ~0.13 of PWM Period for this servo
+	  */
+	 int32_t serv_max = 2600;
+
+	 //POTENTIOMETER MIN & MAX
+	 int32_t pot_min = 70;
+	 int32_t pot_max = 4095;
+
+	  /* ----------------------------
+	  *  ACTIVITY 3: MCU 3
+	  *  Potentiometer to Control a Servo Motor
+	  *  ----------------------------
+	  */
+
+	 pwm_val = MapLinear(adc_value,pot_min,pot_max,serv_min,serv_max);
+	 //time for servo to react to new input
+	 Potcounter++;
+
+	 /* HAL_TIM_SET_COMPARE, setting CCR to the new PWM duty cycle value
+	  * Set the TIM Capture Compare Register value on runtime
+	  * without calling another time ConfigChannel function
+	  */
+	 //RILEY's DEBUG, this needs to be called (along with most of WHILE LOOP) in TIM3 Handler for servo functionality.
+	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
+
+}
 /*LINEAR MAPPING
  * this exists for the input ADC value to be mapped to the
  * minimum and maximum of the servo motor PWM, 180 degrees rotation.
@@ -249,9 +346,8 @@ void TIM2_IRQHandler(void){
     // --- LED1/2 handling (State B) ---
     if (currentState == STATE_B) {
 
-    	ledOn= ledToggle;
+    	ledOn = selectedLed;
 		ledOff = !ledOff;
-		whichLedToggled = ledOn + 1;
 
 
     	// set one LED to OFF
@@ -298,6 +394,20 @@ void TIM2_IRQHandler(void){
 
     // Reset counter when full period completes
 	counter[0] = (counter[0] + 1) % period;
+}
+
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+	  if (htim->Instance == TIM2){
+		  // Toggle GPIO Pin Using HAL Libraries.
+		  if (activity == 3){
+			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
+		  }
+		  else {
+			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8,GPIO_PIN_RESET);
+		  }
+	  }
+	  counter_test++;
 }
 
 void ADC1_COMP_IRQHandler(void){
@@ -399,43 +509,6 @@ void ConfigureButtonEXTI(void) {
     NVIC_EnableIRQ(EXTI4_15_IRQn);
 }
 
-void EXTI4_15_IRQHandler(void){
-
-	//uint32_t now = HAL_GetTick(); //assume 200ms.
-
-	//BUTTON 1
-	// only read once to change state
-	if (EXTI->FPR1 & (1 << 13)) {
-		EXTI->FPR1 = (1 << 13);  // Clear flag
-		buttonPressed[BUTTON2] = 1;
-	}
-	if (EXTI->RPR1 & (1 << 13)) {
-		EXTI->RPR1 = (1 << 13);  // Clear flag
-		buttonPressed[BUTTON2] = 0;
-	}
-
-	// BUTTON 2
-	// must sustain long press and read once.
-	// State A, read once to visit C
-	// State B, sustained press to toggle LEDs.
-
-	if ((EXTI->FPR1 & (1 << 4))) {
-		buttonPressed[BUTTON1] = 0;
-		debugCounter[0]++;
-		//lastDebounceTime = now;
-	}
-	EXTI->FPR1 = (1 << 4);  // Clear flag
-
-	if ((EXTI->RPR1 & (1 << 4))) {
-		buttonPressed[BUTTON1] = 1;
-		debugCounter[1]++;
-		//lastDebounceTime = now;
-	}
-	EXTI->RPR1 = (1 << 4);  // Clear flag
-
-}
-
-
 void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
 		uint32_t arr, IRQn_Type irqNum, uint8_t priority){
 
@@ -523,58 +596,23 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1){
+
+	  switch (currentState){
+
+	  	  case STATE_A: HandleStateA(); break;
+
+	  	  case STATE_B: HandleStateB(); break;
+
+	  	  case STATE_C: HandleStateC(); break;
+
+	  	  default:	currentState = STATE_A; break;
+	  }
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  /* USER CODE BEGIN 3 */
-	  	 HAL_ADC_Start(&hadc1); //for ADC potentiometer
 
-	  	 // Read ADC value from PA0 (0-4095)
-	  	 adc_value = HAL_ADC_GetValue(&hadc1);
-
-	  	 /* Relevant Values
-	  	  * PWM Period is 50Hz, 20ms with resolution of 2000 ticks.
-	  	  * 20ms/20000 = 0.001ms = 1us per tick.
-	  	  */
-
-	  	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
-	  	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
-	  	// if it's showing up weirdly on your own servo.
-
-	  	 /* DUTY CYCLE LOWER: 0 DEGREES
-	  	  * 0.61ms = 610us
-	  	  * datasheet: 0.05 of PWM Period
-	  	  * actual: ~0.03 of PWM Period
-	  	  */
-	  	 int32_t serv_min = 610;
-
-	  	 /* DUTY CYCLE UPPER: 180 DEGREES
-	  	  * 2.60ms = 2450us
-	  	  * datasheet: 0.10 of PWM Period
-	  	  * actual: ~0.13 of PWM Period for this servo
-	  	  */
-	  	 int32_t serv_max = 2600;
-
-	  	 //POTENTIOMETER MIN & MAX
-	  	 int32_t pot_min = 70;
-	  	 int32_t pot_max = 4095;
-
-	    	  /* ----------------------------
-	    	  *  ACTIVITY 3: MCU 3
-	    	  *  Potentiometer to Control a Servo Motor
-	    	  *  ----------------------------
-	    	  */
-
-	  	 pwm_val = MapLinear(adc_value,pot_min,pot_max,serv_min,serv_max);
-	  	 //time for servo to react to new input
-	  	 Potcounter++;
-
-	  	 /* HAL_TIM_SET_COMPARE, setting CCR to the new PWM duty cycle value
-	  	  * Set the TIM Capture Compare Register value on runtime
-	  	  * without calling another time ConfigChannel function
-	  	  */
-	  	 //RILEY's DEBUG, this needs to be called (along with most of WHILE LOOP) in TIM3 Handler for servo functionality.
-	  	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
   }
   /* USER CODE END 3 */
 }
