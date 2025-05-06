@@ -22,6 +22,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+//errors were reached without these, they are used within lcd and uart functionality.
+#include <stdio.h>
+#include <string.h>
+#include "i2c_lcd.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,6 +41,12 @@ typedef enum {
 	STATE_B = 1,
 	STATE_C = 2
 }  SystemState;
+
+typedef enum {
+    PC4_MODE_UNKNOWN,
+    PC4_MODE_UART,
+    PC4_MODE_GPIO
+} Pc4Mode;
 
 /* USER CODE END PTD */
 
@@ -57,6 +67,7 @@ typedef enum {
  */
 // SDA = PB_7
 // SCL = PB_6
+#define LCD_REFRESH_PERIOD 50 //ms
 
 /* *********
  *  ALL LEDs
@@ -68,6 +79,8 @@ typedef enum {
 #define LED2_PIN 5 //CN9_D4
 #define LED3_PORT GPIOB
 #define LED3_PIN 3 //CN9_D3
+#define LED4_PORT GPIOB
+#define LED4_PIN 2 //CN10, in alignment with CN9_D8
 
 /* *********
  *  BUTTONS
@@ -80,14 +93,19 @@ typedef enum {
 
 /* *********
  *  TIMERS
- * *********
- */
+ * *********/
 #define TIMER_SEL TIM2
 #define TIMER_IRQn TIM2_IRQn
 
-//Potentiometer
+/* *********
+ *  ADC POT
+ * *********/
 #define POT_PORT GPIOA
 #define POT_PIN 0
+
+#define ADC_AVG_WINDOW 30  // Average the last 10 values only
+#define POT_ADC_MAX 4095
+#define POT_ADC_MIN 80 //Potentiometer doesn't reach zero, so this is for linear mapping.
 
 /* USER CODE END PD */
 
@@ -97,12 +115,14 @@ typedef enum {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+I2C_HandleTypeDef hi2c1;
 
-TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
+UART_HandleTypeDef huart2;
+
 /* USER CODE BEGIN PV */
+I2C_LCD_HandleTypeDef lcd1;
 
 volatile SystemState currentState = STATE_A;
 
@@ -119,7 +139,6 @@ volatile uint32_t lastReleaseTime[2] = {0,0};
 const uint32_t debounceDelay = 30; //ms
 volatile uint32_t buttonState[2]= {0};
 
-volatile uint32_t uartEnabled = 1;
 volatile uint32_t selectedLed = 0;
 volatile uint32_t ledOn = 0;
 volatile uint32_t ledOff = 1;
@@ -138,7 +157,14 @@ volatile int32_t Potcounter = 0;
 volatile int32_t hal_delay = 1;
 
 //potentiometer
-volatile int32_t adc_value = 0;
+
+volatile int32_t latestAdcValue = 0;
+volatile int32_t adcNewValueFlag = 0;
+volatile uint32_t adcHistory[ADC_AVG_WINDOW] = {0};  // Stores the last 10 readings
+volatile uint8_t adcHistoryIndex = 0;  // Tracks where to insert the new value
+
+volatile uint32_t variableBlinkingFrequency = 0; //for led3
+volatile uint32_t led3counter = 0;
 
 //for servo, 47 as minimum is explained below
 volatile int32_t pwm_val = 470; //for activity 2 sweeping!
@@ -146,14 +172,36 @@ volatile int32_t direction = 0; // to be treated as boolean
 
 volatile int32_t counter_test = 0;
 
+
+/**************************
+ *** ALL UART VARIABLES ***
+ **************************/
+volatile uint32_t uartEnabled = 1;
+volatile Pc4Mode pc4CurrentMode = PC4_MODE_UNKNOWN;
+
+//transmit data variable
+volatile char txData [] = "Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX\r\n";
+volatile char rxData [] = "";
+
+volatile int32_t isTransmitting = 1;
+volatile int32_t uartCounter = 0;
+volatile int8_t uartTransmitFlag = 0;
+
+/*************************
+ *** ALL LCD VARIABLES ***
+ *************************/
+
+volatile int8_t lcdUpdateFlag = 0;
+volatile int32_t lcdCounter = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_TIM2_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
-static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* Declare all functions here, rather than relying on
@@ -170,7 +218,11 @@ void HandleStateA(void);
 void HandleStateB(void);
 void HandleStateC(void);
 
-int MapLinear(int x, int in_min, int in_max, int out_min, int out_max);
+void ConfigureTxForUart(void);
+void ConfigureTxForGpio(void);
+
+uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax,
+		uint32_t outMin, uint32_t outMax);
 
 /* USER CODE END PFP */
 
@@ -212,17 +264,87 @@ void EXTI4_15_IRQHandler(void){
 }
 
 /* ****************************
+ * ******* USART LOGIC ********
+ * ****************************/
+
+void TransmitWithADC(void){
+	char messageWithAdc [100];
+	if (!uartTransmitFlag) return; //immediate exit if no transmission
+
+	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %lu\r\n", adcValue);
+
+	if(HAL_UART_Transmit(&huart2, (uint8_t*)messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
+		 Error_Handler();
+	//Riley's note:
+	// 'uint8_t*) included to remove warning. signedness differed.
+	// removed warning without changing variable type.
+
+	uartTransmitFlag = 0; //clear flag after successful transmit
+
+}
+
+void ConfigureTxForUart(void) {
+    if (pc4CurrentMode == PC4_MODE_UART) return; // already UART, skip
+
+    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_4);  // Release PC4 from any previous GPIO mode
+
+    MX_USART2_UART_Init(); // CubeMX-generated USART1 initializer (re-init UART and PC4 alternate function)
+
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
+
+    pc4CurrentMode = PC4_MODE_UART;
+}
+
+void ConfigureTxForGpio(void) {
+    if (pc4CurrentMode == PC4_MODE_GPIO) return; // already GPIO, skip
+
+    HAL_UART_DeInit(&huart2);  // Disable UART, free PC4
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    pc4CurrentMode = PC4_MODE_GPIO;
+}
+
+/* **************************
+ * ******* LCD LOGIC ********
+ * **************************/
+
+void OutputLCD(const char* line1, const char* line2) {
+	if(!lcdUpdateFlag)return; //prevents endless refresh
+    lcd_clear(&lcd1);
+
+    lcd_gotoxy(&lcd1, 0, 0);
+    lcd_puts(&lcd1, line1);
+
+    lcd_gotoxy(&lcd1, 0, 1);
+    lcd_puts(&lcd1, line2);
+    lcdUpdateFlag = 0;
+}
+
+/* ****************************
  * ***** STATE MACHINE ********
  * ****************************/
 
 void HandleStateA(void) {
-	// To do: Display LCD SID
-		//displayLcdSid(); // shows SID and course name
 
-	// To do: Transmit UART if uartEnabled
-    if (uartEnabled) {
-        //transmitUart(adcValue); // send UART string every 500ms
-    }
+	// UART Transmitting
+	ConfigureTxForUart(); //UART ON
+	TransmitWithADC();
+
+	// LCD STATE A
+	OutputLCD("SID: 14057208", "MECHATRONICS 1");
+
+	// UART Receiving (only in State A)
+	HAL_UART_Receive_IT(&huart2, rxData, sizeof(rxData));
+	// UART Transmitting
+	TransmitWithADC();
 
     if (ButtonWasPressed(BUTTON1)) {
 		currentState = STATE_C;
@@ -237,12 +359,15 @@ void HandleStateA(void) {
 }
 
 void HandleStateB(void) {
-	// ADC updates adcValue in ISR
-	// led_period[1] (for LED3 PWM blink) already updated in ADC ISR
 
-    //displayLcdAdc(adcValue);      // shows ADC value
-    //updateLed3Blinking(adcValue); // update blink rate
-    //rotateServo(adcValue);        // update PWM for servo
+
+	ServoMove();
+
+	//LCD ALL FUNCTIONALITY
+	char adcText[17];
+	snprintf(adcText, sizeof(adcText), "ADC:%4lu STATE B", adcValue);
+
+	OutputLCD(adcText, "MECHATRONICS 1");
 
     if (buttonState[BUTTON1]) {
         selectedLed = 1; //LED2 blinks while button is held
@@ -258,6 +383,10 @@ void HandleStateB(void) {
 
 void HandleStateC(void) {
 	 static uint8_t started = 0;
+
+	 ConfigureTxForGpio(); //UART OFF
+
+	 OutputLCD("", ""); //LCD
 
 	if (!started) {
 		started = 1;
@@ -280,45 +409,22 @@ void HandleStateC(void) {
 
 void ServoMove(void){
 
-	 HAL_ADC_Start(&hadc1); //for ADC potentiometer
-
-	 // Read ADC value from PA0 (0-4095)
-	 adc_value = HAL_ADC_GetValue(&hadc1);
-
-	 /* Relevant Values
-	  * PWM Period is 50Hz, 20ms with resolution of 2000 ticks.
-	  * 20ms/20000 = 0.001ms = 1us per tick.
-	  */
+	//HAVE A FLAG FOR TIMING HOW OFTEN THE SERVO IS ALLOWED TO RECIEVE A NEW COMMAND
 
 	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
 	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
 	// if it's showing up weirdly on your own servo.
 
-	 /* DUTY CYCLE LOWER: 0 DEGREES
-	  * 0.61ms = 610us
-	  * datasheet: 0.05 of PWM Period
-	  * actual: ~0.03 of PWM Period
-	  */
-	 int32_t serv_min = 610;
+	 // SERVO PULSE WIDTH LIMITS (tested)
+	 const int32_t serv_min = 610; // 0 degrees, ~0.61ms
+	 const int32_t serv_max = 2600; // 180 degrees, ~2.6ms
 
-	 /* DUTY CYCLE UPPER: 180 DEGREES
-	  * 2.60ms = 2450us
-	  * datasheet: 0.10 of PWM Period
-	  * actual: ~0.13 of PWM Period for this servo
-	  */
-	 int32_t serv_max = 2600;
+	 pwm_val = LinearMap(adcValue,POT_ADC_MAX,0,serv_min,serv_max);
 
-	 //POTENTIOMETER MIN & MAX
-	 int32_t pot_min = 70;
-	 int32_t pot_max = 4095;
+	 // Safety if values end up beyond
+	 if (pwm_val < serv_min) pwm_val = serv_min;
+	 if (pwm_val > serv_max) pwm_val = serv_max;
 
-	  /* ----------------------------
-	  *  ACTIVITY 3: MCU 3
-	  *  Potentiometer to Control a Servo Motor
-	  *  ----------------------------
-	  */
-
-	 pwm_val = MapLinear(adc_value,pot_min,pot_max,serv_min,serv_max);
 	 //time for servo to react to new input
 	 Potcounter++;
 
@@ -334,12 +440,39 @@ void ServoMove(void){
  * this exists for the input ADC value to be mapped to the
  * minimum and maximum of the servo motor PWM, 180 degrees rotation.
  */
-int MapLinear(int x, int inMin, int inMax, int outMin, int outMax){
-	return (x - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax, uint32_t outMin, uint32_t outMax){
+    if (inMax == inMin) return outMin; // prevent divide-by-zero
+
+    if (x < inMin) x = inMin;
+    if (x > inMax) x = inMax;
+
+    //uint64_t avoids overflow during multiplication
+    return ((uint64_t)(x - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
 }
 
 void TIM2_IRQHandler(void){
     TIM2->SR &= ~TIM_SR_UIF; // Clear update interrupt flag
+
+    /* ***********************
+	 * LCD Counter for Refresh
+	 * ***********************
+	 */
+	lcdCounter++;
+	if (lcdCounter > LCD_REFRESH_PERIOD -1){
+		lcdUpdateFlag = 1;
+		lcdCounter = 0;
+	}
+
+	/* *****************************
+	 * UART Counter for Transmission
+	 * ******************************/
+	uartCounter++;
+	if (uartCounter > 499 //specified output frequency 500ms.
+			&& currentState == STATE_A
+			&& isTransmitting){
+		uartTransmitFlag = 1;
+		uartCounter = 0;
+	}
 
     static uint16_t period = 1000;
 
@@ -362,13 +495,32 @@ void TIM2_IRQHandler(void){
 			GPIOB->BSRR = (1 << (ledBitPos[ledOn] + 16)); //LED blinks off
 			blink = 0;
 		}
+
+
+		// --- LED3 ADC BLINKING PERIOD
+
+		variableBlinkingFrequency = LinearMap(adcValue,0,POT_ADC_MAX,200,1000);
+
+		if(led3counter > variableBlinkingFrequency / 2){
+			GPIOB->BSRR = (1 << LED3_PIN); //ON
+		}
+		if(led3counter < variableBlinkingFrequency / 2){
+			GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED OFF
+		}
+
+		led3counter = (led3counter + 1) % variableBlinkingFrequency;
+    }
+    else {
+    	GPIOB->BSRR = (1 << (LED1_PIN + 16)); //LED blinks off
+		GPIOB->BSRR = (1 << (LED2_PIN + 16)); //LED blinks off
+		GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED blinks off
     }
 
-    // --- LED3 3x flash handling (State C) ---
-    else if (currentState == STATE_C) {
+    // --- LED4 3x flash handling (State C) ---
+    if (currentState == STATE_C) {
     	//Start of state
     	if (cState == 0) {
-			LED3_PORT->BSRR = (1 << LED3_PIN); // ON
+			LED4_PORT->BSRR = (1 << LED4_PIN); // ON
 			counter[1] = 0;
 			cState = 1;
 		}
@@ -376,10 +528,10 @@ void TIM2_IRQHandler(void){
     	//Phase 1 - Blinking Logic
     	if (cState == 1){
     		if (counter[1] > period / 2 ){
-				GPIOB->BSRR = (1 << LED3_PIN); //LED blinks on
+				GPIOB->BSRR = (1 << LED4_PIN); //LED blinks on
 			}
 			if (counter[1] <= period / 2){
-				GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED blinks off
+				GPIOB->BSRR = (1 << (LED4_PIN + 16)); //LED blinks off
 			}
 			if (counter[1] <= period){
 				counter[1] = 0;
@@ -396,7 +548,7 @@ void TIM2_IRQHandler(void){
 	counter[0] = (counter[0] + 1) % period;
 }
 
-
+/*
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	  if (htim->Instance == TIM2){
 		  // Toggle GPIO Pin Using HAL Libraries.
@@ -409,15 +561,70 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 	  }
 	  counter_test++;
 }
+*/
+
+
+/* *********************************
+ * ***** POTENTIOMETER ADC  ********
+ * *********************************/
 
 void ADC1_COMP_IRQHandler(void){
 
-	adcValue = ADC1->DR;
+	uint32_t localAdcValue = ADC1->DR; //take value
+	adcNewValueFlag = 1;
+
+	if (localAdcValue < POT_ADC_MIN){ //if at fluctuating low point, make minimum
+		localAdcValue = POT_ADC_MIN;
+	}
+
+	latestAdcValue = localAdcValue;
 
 	ADC1->ISR |= (1 << 2); //clear the interrupt flag
 
 	ADC1->CR |= 1 << 2; //start new ADC conversion
 
+}
+
+void GetAdcValue(void){
+
+	if (!adcNewValueFlag) return;
+	adcNewValueFlag = 1;
+
+	// Store latest value into the buffer at the current index
+	adcHistory[adcHistoryIndex] = latestAdcValue;
+
+	// Move to next index, wrapping around at the end (circular buffer)
+	adcHistoryIndex = (adcHistoryIndex + 1) % ADC_AVG_WINDOW;
+
+	// Calculate average of the 10 stored values
+	uint32_t sum = 0;
+	for(uint8_t i = 0; i < ADC_AVG_WINDOW; i++) {
+		sum += adcHistory[i];
+	}
+	uint32_t averagedValue = sum / ADC_AVG_WINDOW;
+
+	// Map averaged result to desired range
+	adcValue = LinearMap(averagedValue,POT_ADC_MIN,POT_ADC_MAX,0,POT_ADC_MAX);
+
+
+	//RILEY's NOTE, potential EXTRA FOR SERVO, a DEADBAND to stop servo jitter.
+
+}
+
+void InitAdcHistory(void) {
+    // Fill the history buffer with the first valid ADC value
+    for (uint8_t i = 0; i < ADC_AVG_WINDOW; i++) {
+        adcHistory[i] = latestAdcValue;
+    }
+}
+
+void configure_LCD(void){
+	MX_I2C1_Init(); // CubeMX-generated
+
+	lcd1.hi2c = &hi2c1;
+	lcd1.address = 0x27 << 1;  // (confirm your backpack's address, usually 0x27 or 0x3F)
+	lcd_init(&lcd1);
+	lcd_clear(&lcd1);
 }
 
 void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin) {
@@ -548,9 +755,11 @@ void InitAll(){
 
 	// ADC
 	ConfigureAdc(); //PA0 Potentiometer
+	InitAdcHistory(); //sets average to current value
 
 	// TIM
 	ConfigureTimer(TIM2, 16 - 1, 1000 - 1, TIM2_IRQn, 3); //All LEDs
+	//TIM3 for servo done in .ioc
 }
 
 /* USER CODE END 0 */
@@ -584,9 +793,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_TIM2_Init();
+  MX_I2C1_Init();
+  MX_USART2_UART_Init();
   MX_TIM3_Init();
-  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   InitAll();
 
@@ -596,6 +805,8 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1){
+
+	  GetAdcValue(); // Averaged out value.
 
 	  switch (currentState){
 
@@ -658,106 +869,50 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief ADC1 Initialization Function
+  * @brief I2C1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC1_Init(void)
+static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN ADC1_Init 0 */
+  /* USER CODE BEGIN I2C1_Init 0 */
 
-  /* USER CODE END ADC1_Init 0 */
+  /* USER CODE END I2C1_Init 0 */
 
-  ADC_ChannelConfTypeDef sConfig = {0};
+  /* USER CODE BEGIN I2C1_Init 1 */
 
-  /* USER CODE BEGIN ADC1_Init 1 */
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x00503D58;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  /** Configure Analogue filter
   */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.LowPowerAutoPowerOff = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.SamplingTimeCommon1 = ADC_SAMPLETIME_1CYCLE_5;
-  hadc1.Init.SamplingTimeCommon2 = ADC_SAMPLETIME_1CYCLE_5;
-  hadc1.Init.OversamplingMode = DISABLE;
-  hadc1.Init.TriggerFrequencyMode = ADC_TRIGGER_FREQ_HIGH;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Configure Regular Channel
+  /** Configure Digital filter
   */
-  sConfig.Channel = ADC_CHANNEL_0;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLINGTIME_COMMON_1;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC1_Init 2 */
+  /* USER CODE BEGIN I2C1_Init 2 */
 
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 15999;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 499;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -773,29 +928,18 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
   /* USER CODE BEGIN TIM3_Init 1 */
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 15;
+  htim3.Init.Prescaler = 16-1;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 19999;
+  htim3.Init.Period = 20000-1;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
@@ -822,12 +966,61 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -835,12 +1028,43 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+
+// This function has been moved to main.c
+// Purpose is called when key press triggers interrupt.
+// - Riley
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  /* Prevent unused argument(s) compilation warning */
+  UNUSED(huart);
+
+  /* NOTE : This function should not be modified, when the callback is needed,
+            the HAL_UART_RxCpltCallback can be implemented in the user file.
+   */
+
+  //Echoing user input for the purpose of debugging
+  char toggleMessage [] = "UART output toggled with E key. \r\n";
+
+  //strcasecmp means the key will activate for 'e' and 'E'
+  // const char to remove warning as strcasecmp expects const char.
+  // - Riley
+  if (!strcasecmp((const char*)rxData, "e")){
+      isTransmitting = !isTransmitting;
+	  HAL_UART_Transmit(&huart2, (uint8_t*)toggleMessage, strlen(toggleMessage), HAL_MAX_DELAY);
+  }
+
+}
 
 /* USER CODE END 4 */
 
