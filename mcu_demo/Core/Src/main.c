@@ -43,6 +43,11 @@ typedef enum {
 }  SystemState;
 
 typedef enum {
+	LCD_COUNTER= 0,
+	SERVO_COUNTER = 1,
+}  counterArray;
+
+typedef enum {
     PA2_MODE_UNKNOWN,
     PA2_MODE_UART,
     PA2_MODE_GPIO
@@ -52,6 +57,8 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define NUM_COUNTERS 3
 
 /* *************
  *  USART (TX/RX)
@@ -128,6 +135,8 @@ UART_HandleTypeDef huart2;
 I2C_LCD_HandleTypeDef lcd1;
 
 volatile SystemState currentState = STATE_A;
+volatile uint32_t counters[NUM_COUNTERS] = {0};
+volatile uint32_t counterFlag[NUM_COUNTERS] = {0};
 
 volatile uint32_t ledBitPos[2] = {LED1_PIN,LED2_PIN};
 
@@ -293,9 +302,9 @@ void TransmitWithADC(void){
 void ConfigureTxForUart(void) {
     if (pa2CurrentMode == PA2_MODE_UART) return; // already UART, skip
 
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // Release PA2 and PA3 from any previous GPIO mode
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // De-init PA2 (TX) and PA3 (RX)
 
-    MX_USART2_UART_Init(); // CubeMX-generated USART2 initializer (re-init UART on PA2 and PA3)
+    MX_USART2_UART_Init(); // CubeMX USART2 init — now PA2/PA3
 
     __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
 
@@ -305,7 +314,7 @@ void ConfigureTxForUart(void) {
 void ConfigureTxForGpio(void) {
     if (pa2CurrentMode == PA2_MODE_GPIO) return; // already GPIO, skip
 
-    HAL_UART_DeInit(&huart2);  // Disable UART, free PA2 and PA3
+    HAL_UART_DeInit(&huart2);  // Disable USART2 — PA2/PA3 freed
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
@@ -328,9 +337,11 @@ void OutputLCD(const char* line1, const char* line2) {
 	static char prevLine1[17] = "";
 	static char prevLine2[17] = "";
 
-	if(!lcdUpdateFlag) return; //prevents endless refresh
+	CounterFlag(LCD_COUNTER, LCD_REFRESH_PERIOD);
 
-	lcdUpdateFlag = 0;
+	if(!counterFlag[LCD_COUNTER]) return; //prevents endless refresh
+
+	counterFlag[LCD_COUNTER] = 0;
 
 	// Only update if lines changed
 	// This prevents needless clearing, which shows as flickering.
@@ -359,7 +370,7 @@ void OutputLCD(const char* line1, const char* line2) {
 void HandleStateA(void) {
 
 	// UART Transmitting
-	ConfigureTxForUart(); //UART ON
+	//ConfigureTxForUart(); //UART ON
 	TransmitWithADC();
 
 	// LCD STATE A
@@ -408,7 +419,7 @@ void HandleStateB(void) {
 void HandleStateC(void) {
 	 static uint8_t started = 0;
 
-	 ConfigureTxForGpio(); //UART OFF
+	 //ConfigureTxForGpio(); //UART OFF
 
 	 OutputLCD("", ""); //LCD
 
@@ -431,11 +442,20 @@ void HandleStateC(void) {
  * ***** SERVO MOVING  ********
  * ****************************/
 
+void CounterFlag(int8_t selection, int32_t reset){
+	if (counters[selection] > reset -1){
+		counterFlag[selection] = 1; //set flag
+		counters[selection] = 0; //reset counter
+	}
+}
+
 void ServoMove(void){
 
+	CounterFlag(SERVO_COUNTER,SERVO_REFRESH_PERIOD);
+
 	//check if its time to update the servo
-	if (!servoFlag) return;
-	servoFlag = 0;
+	if (!counterFlag[SERVO_COUNTER]) return;
+	counterFlag[SERVO_COUNTER] = 0;
 
 	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
 	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
@@ -472,21 +492,23 @@ void TIM2_IRQHandler(void){
 	 * LCD Counter for Refresh
 	 * ***********************
 	 */
-	lcdCounter++;
-	if (lcdCounter > LCD_REFRESH_PERIOD -1){
-		lcdUpdateFlag = 1;
-		lcdCounter = 0;
-	}
+	//lcdCounter++;
+	//if (lcdCounter > LCD_REFRESH_PERIOD -1){
+	//	lcdUpdateFlag = 1;
+	//	lcdCounter = 0;
+	//}
+	counters[LCD_COUNTER]++;
+	counters[SERVO_COUNTER]++;
 
 	/* ***********************
 	 * SERVO Counter for Refresh
 	 * ***********************
 	 */
-	servoCounter++;
-	if (servoCounter > SERVO_REFRESH_PERIOD -1){
-		servoFlag = 1;
-		servoCounter = 0;
-	}
+	///servoCounter++;
+	//if (servoCounter > SERVO_REFRESH_PERIOD -1){
+	//	servoFlag = 1;
+	//	servoCounter = 0;
+	//}
 
 
 	/* *****************************
