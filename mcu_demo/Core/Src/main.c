@@ -45,6 +45,10 @@ typedef enum {
 typedef enum {
 	LCD_COUNTER= 0,
 	SERVO_COUNTER = 1,
+	UART_COUNTER = 2,
+	ALT_LED_COUNTER = 3,
+	ADC_LED_COUNTER = 4,
+	STATE_C_COUNTER = 5
 }  counterArray;
 
 typedef enum {
@@ -58,7 +62,7 @@ typedef enum {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define NUM_COUNTERS 3
+#define NUM_COUNTERS 6
 
 /* *************
  *  USART (TX/RX)
@@ -117,6 +121,10 @@ typedef enum {
 // SCL = PB_6
 #define LCD_REFRESH_PERIOD 50 //ms
 
+#define UART_UPDATE_PERIOD 500 //ms
+
+#define ALT_LEDS_PERIOD 1000 //ms
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -135,8 +143,7 @@ UART_HandleTypeDef huart2;
 I2C_LCD_HandleTypeDef lcd1;
 
 volatile SystemState currentState = STATE_A;
-volatile uint32_t counters[NUM_COUNTERS] = {0};
-volatile uint32_t counterFlag[NUM_COUNTERS] = {0};
+volatile uint32_t counterSelection[NUM_COUNTERS] = {0};  // LCD, SERVO, UART, ALT_LED, ADC_LED, STATE_C
 
 volatile uint32_t ledBitPos[2] = {LED1_PIN,LED2_PIN};
 
@@ -154,9 +161,9 @@ volatile uint32_t buttonState[2]= {0};
 volatile uint32_t selectedLed = 0;
 volatile uint32_t ledOn = 0;
 volatile uint32_t ledOff = 1;
-
 volatile uint32_t blink = 0;
 
+volatile uint32_t adcLedState = 0;
 volatile uint32_t adcValue = 0;
 
 volatile uint32_t cState = 0;       // 0 = OFF, 1 = ON
@@ -174,8 +181,7 @@ volatile int32_t adcNewValueFlag = 0;
 volatile uint32_t adcHistory[ADC_AVG_WINDOW] = {0};  // Stores the last 10 readings
 volatile uint8_t adcHistoryIndex = 0;  // Tracks where to insert the new value
 
-volatile uint32_t variableBlinkingFrequency = 0; //for led3
-volatile uint32_t led3counter = 0;
+volatile uint32_t variableBlinkingFrequency = 0; //for ADC LED 3
 
 //for servo, 47 as minimum is explained below
 volatile int32_t pwm_val = 0; //for activity 2 sweeping!
@@ -184,6 +190,7 @@ volatile int32_t direction = 0; // to be treated as boolean
 volatile int32_t counter_test = 0;
 volatile int8_t servoFlag = 0;
 volatile int32_t servoCounter = 0;
+volatile int8_t altLedFlag = 0;
 
 
 /**************************
@@ -217,36 +224,56 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
-/* Declare all functions here, rather than relying on
- * implicitly declarations from compiler:
- * - Riley */
+// --- General Utilities ---
+uint8_t ButtonWasPressed(uint8_t buttonIndex);
+void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin);
+void EXTI4_15_IRQHandler(void);
+int isTimeReached(int8_t selection, int32_t reset);
+uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax,
+		uint32_t outMin, uint32_t outMax);
 
-void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin);
-void ConfigureAdc(void);
-void ConfigureButtonEXTI(void);
-void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
-		uint32_t arr, IRQn_Type irqNum, uint8_t priority);
-
+// --- State Machine ---
 void HandleStateA(void);
 void HandleStateB(void);
 void HandleStateC(void);
 
+// --- ADC ---
+void ADC1_COMP_IRQHandler(void);
+void GetAdcValue(void);
+void InitAdcHistory(void);
+void ConfigureAdc(void);
+
+// --- Outputs (LCD, UART, LEDs) ---
+void OutputLCD(const char* line1, const char* line2);
+void configure_LCD(void);
+void UartSendAdcMessageIfEnabled(void);
+void ServoMove(void);
+void AltLedBlinking(void);
+void AdcLedBlinking(void);
+
+// --- GPIO, EXTI, Timer Config ---
 void ConfigureTxForUart(void);
 void ConfigureTxForGpio(void);
+void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin);
+void ConfigureButtonEXTI(void);
+void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
+		uint32_t arr, IRQn_Type irqNum, uint8_t priority);
 
-void ServoMove(void);
+// --- Interrupt Handlers ---
+void TIM2_IRQHandler(void);
 
-uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax,
-		uint32_t outMin, uint32_t outMax);
+// --- System Init ---
+void InitAll(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* ****************************
- * ******* BUTTON LOGIC *******
- * ****************************/
+/* ==========================================
+ * 				General Utilities
+ * 		 (Buttons and General Functions)
+ * ========================================== */
 
 // This function is called when button PRESS matters,
 // not button being HELD.
@@ -259,7 +286,7 @@ uint8_t ButtonWasPressed(uint8_t buttonIndex){
 	return 0; // No new press
 }
 
-void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin, uint32_t bug){
+void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
     if (isFalling) {
         buttonState[button] = 1;  // Button is now pressed
         EXTI->FPR1 = (1 << pin);   // Clear falling edge flag
@@ -267,119 +294,69 @@ void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin, uint
         buttonState[button] = 0;  // Button is now released
         EXTI->RPR1 = (1 << pin);   // Clear rising edge flag
     }
-    debugCounter[bug]++;
 }
 
 void EXTI4_15_IRQHandler(void){
 
-    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13, 0);
-    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13, 1);
+    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13);
+    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13);
 
-    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4, 2);
-    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4, 3);
+    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4);
+    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4);
 }
 
-/* ****************************
- * ******* USART LOGIC ********
- * ****************************/
+//=============================
+// Function: isTimeReached
+// Purpose:  Returns 1 ("true") if a time period has elapsed.
+//
+// - Polls a counter incremented in TIM2_IRQHandler (1ms steps).
+// - Used for scheduling periodic tasks without blocking delays.
+//=============================
+int isTimeReached(int8_t selection, int32_t reset){
 
-void TransmitWithADC(void){
-	char messageWithAdc [100];
-	if (!uartTransmitFlag) return; //immediate exit if no transmission
-
-	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %lu\r\n", adcValue);
-
-	if(HAL_UART_Transmit(&huart2, (uint8_t*)messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
-		 Error_Handler();
-	//Riley's note:
-	// 'uint8_t*) included to remove warning. signedness differed.
-	// removed warning without changing variable type.
-
-	uartTransmitFlag = 0; //clear flag after successful transmit
-
+	// If counter has reached desired period
+    if (counterSelection[selection] >= reset) {
+        counterSelection[selection] = 0;
+        return 1; // True
+    }
+    return 0; // False
 }
 
-void ConfigureTxForUart(void) {
-    if (pa2CurrentMode == PA2_MODE_UART) return; // already UART, skip
+//=============================
+// Function: LinearMap
+// Purpose:  Standard linear mapping function.
+//
+// - Converts an input value 'x' from [inMin, inMax] to
+//	 	a proportional value in [outMin, outMax].
+// - Clamps 'x' to the input range to avoid out-of-bound results.
+// - Uses uint64_t multiplication to prevent overflow.
+//=============================
+uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax, uint32_t outMin, uint32_t outMax){
+    if (inMax == inMin) return outMin; // prevent divide-by-zero
 
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // De-init PA2 (TX) and PA3 (RX)
+    if (x < inMin) x = inMin;
+    if (x > inMax) x = inMax;
 
-    MX_USART2_UART_Init(); // CubeMX USART2 init — now PA2/PA3
-
-    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
-
-    pa2CurrentMode = PA2_MODE_UART;
+    //uint64_t avoids overflow during multiplication
+    return ((uint64_t)(x - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
 }
 
-void ConfigureTxForGpio(void) {
-    if (pa2CurrentMode == PA2_MODE_GPIO) return; // already GPIO, skip
-
-    HAL_UART_DeInit(&huart2);  // Disable USART2 — PA2/PA3 freed
-
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    pa2CurrentMode = PA2_MODE_GPIO;
-}
-
-/* **************************
- * ******* LCD LOGIC ********
- * **************************/
-
-void OutputLCD(const char* line1, const char* line2) {
-
-	static char prevLine1[17] = "";
-	static char prevLine2[17] = "";
-
-	CounterFlag(LCD_COUNTER, LCD_REFRESH_PERIOD);
-
-	if(!counterFlag[LCD_COUNTER]) return; //prevents endless refresh
-
-	counterFlag[LCD_COUNTER] = 0;
-
-	// Only update if lines changed
-	// This prevents needless clearing, which shows as flickering.
-
-	if (strcmp(line1, prevLine1) == 0 && strcmp(line2, prevLine2) == 0){
-		return; // no new data, skip the update
-	}
-
-    lcd_clear(&lcd1);
-
-    lcd_gotoxy(&lcd1, 0, 0);
-    lcd_puts(&lcd1, line1);
-
-    lcd_gotoxy(&lcd1, 0, 1);
-    lcd_puts(&lcd1, line2);
-
-    // Save new lines as previous for next comparison
-	strncpy(prevLine1, line1, sizeof(prevLine1));
-	strncpy(prevLine2, line2, sizeof(prevLine2));
-}
-
-/* ****************************
- * ***** STATE MACHINE ********
- * ****************************/
+/* ==========================================
+ * 				 State Machine
+ * 		 	 (for switch in while)
+ * ========================================== */
 
 void HandleStateA(void) {
 
 	// UART Transmitting
-	//ConfigureTxForUart(); //UART ON
-	TransmitWithADC();
+	//ConfigureTxForUart();
+	UartSendAdcMessageIfEnabled();
 
 	// LCD STATE A
 	OutputLCD("SID: 14057208", "MECHATRONICS 1");
 
 	// UART Receiving (only in State A)
 	HAL_UART_Receive_IT(&huart2, (uint8_t*)rxData, sizeof(rxData));
-	// UART Transmitting
-	TransmitWithADC();
 
     if (ButtonWasPressed(BUTTON1)) {
 		currentState = STATE_C;
@@ -436,180 +413,34 @@ void HandleStateC(void) {
 		started = 0;
 		currentState = STATE_A;
 	}
+
+
+	///ALL MAJOR UART TO BE DONE HERE
 }
 
-/* ****************************
- * ***** SERVO MOVING  ********
- * ****************************/
+/* ==========================================
+ * 				 	  ADC
+ * 		 (Handler, GetAdcValue, Config)
+ * ========================================== */
 
-void CounterFlag(int8_t selection, int32_t reset){
-	if (counters[selection] > reset -1){
-		counterFlag[selection] = 1; //set flag
-		counters[selection] = 0; //reset counter
-	}
-}
-
-void ServoMove(void){
-
-	CounterFlag(SERVO_COUNTER,SERVO_REFRESH_PERIOD);
-
-	//check if its time to update the servo
-	if (!counterFlag[SERVO_COUNTER]) return;
-	counterFlag[SERVO_COUNTER] = 0;
-
-	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
-	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
-	// if it's showing up weirdly on your own servo.
-
-	 // SERVO PULSE WIDTH LIMITS (to test again)
-	 const int32_t serv_min = 610; // 0 degrees, ~0.61ms
-	 const int32_t serv_max = 2600; // 180 degrees, ~2.6ms
-
-	 // Map ADC value to servo pulse width
-	 pwm_val = LinearMap(adcValue, 0, POT_ADC_MAX, serv_min, serv_max);
-
-	 // Update the PWM duty cycle (CCR value)
-	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
-}
-/*LINEAR MAPPING
- * this exists for the input ADC value to be mapped to the
- * minimum and maximum of the servo motor PWM, 180 degrees rotation.
- */
-uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax, uint32_t outMin, uint32_t outMax){
-    if (inMax == inMin) return outMin; // prevent divide-by-zero
-
-    if (x < inMin) x = inMin;
-    if (x > inMax) x = inMax;
-
-    //uint64_t avoids overflow during multiplication
-    return ((uint64_t)(x - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
-}
-
-void TIM2_IRQHandler(void){
-    TIM2->SR &= ~TIM_SR_UIF; // Clear update interrupt flag
-
-    /* ***********************
-	 * LCD Counter for Refresh
-	 * ***********************
-	 */
-	//lcdCounter++;
-	//if (lcdCounter > LCD_REFRESH_PERIOD -1){
-	//	lcdUpdateFlag = 1;
-	//	lcdCounter = 0;
-	//}
-	counters[LCD_COUNTER]++;
-	counters[SERVO_COUNTER]++;
-
-	/* ***********************
-	 * SERVO Counter for Refresh
-	 * ***********************
-	 */
-	///servoCounter++;
-	//if (servoCounter > SERVO_REFRESH_PERIOD -1){
-	//	servoFlag = 1;
-	//	servoCounter = 0;
-	//}
-
-
-	/* *****************************
-	 * UART Counter for Transmission
-	 * ******************************/
-	uartCounter++;
-	if (uartCounter > 499 //specified output frequency 500ms.
-			&& currentState == STATE_A
-			&& isTransmitting){
-		uartTransmitFlag = 1;
-		uartCounter = 0;
-	}
-
-    static uint16_t period = 1000;
-
-    // --- LED1/2 handling (State B) ---
-    if (currentState == STATE_B) {
-
-    	ledOn = selectedLed;
-		ledOff = !ledOff;
-
-
-    	// set one LED to OFF
-		GPIOB->BSRR = (1 << (ledBitPos[ledOff] + 16)); //whichever LED is off at the time
-
-		//counter and
-		if (counter[0] > period / 2 ){
-			GPIOB->BSRR = (1 << ledBitPos[ledOn]); //LED blinks on
-			blink = 1;
-		}
-		if (counter[0] < period / 2){
-			GPIOB->BSRR = (1 << (ledBitPos[ledOn] + 16)); //LED blinks off
-			blink = 0;
-		}
-
-
-		// --- LED3 ADC BLINKING PERIOD
-
-		variableBlinkingFrequency = LinearMap(adcValue,0,POT_ADC_MAX,200,1000);
-
-		if(led3counter > variableBlinkingFrequency / 2){
-			GPIOB->BSRR = (1 << LED3_PIN); //ON
-		}
-		if(led3counter < variableBlinkingFrequency / 2){
-			GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED OFF
-		}
-
-		led3counter = (led3counter + 1) % variableBlinkingFrequency;
-    }
-    else {
-    	GPIOB->BSRR = (1 << (LED1_PIN + 16)); //LED blinks off
-		GPIOB->BSRR = (1 << (LED2_PIN + 16)); //LED blinks off
-		GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED blinks off
-    }
-
-    // --- LED4 3x flash handling (State C) ---
-    if (currentState == STATE_C) {
-    	//Start of state
-    	if (cState == 0) {
-			LED4_PORT->BSRR = (1 << LED4_PIN); // ON
-			counter[1] = 0;
-			cState = 1;
-		}
-
-    	//Phase 1 - Blinking Logic
-    	if (cState == 1){
-    		if (counter[1] > period / 2 ){
-				GPIOB->BSRR = (1 << LED4_PIN); //LED blinks on
-			}
-			if (counter[1] <= period / 2){
-				GPIOB->BSRR = (1 << (LED4_PIN + 16)); //LED blinks off
-			}
-			if (counter[1] <= period){
-				counter[1] = 0;
-				ledBlinkCounter++;
-		        if (ledBlinkCounter >= 3) {
-		        	ledDone = 1;
-				}
-			}
-
-    	}
-    }
-
-    // Reset counter when full period completes
-	counter[0] = (counter[0] + 1) % period;
-}
-
-
-/* *********************************
- * ***** POTENTIOMETER ADC  ********
- * *********************************/
-
+//=============================
+// Interrupt: ADC1 Handler
+// Purpose:  Takes in new ADC value.
+//
+// - adjusts minimum to help with linear mapping later
+//=============================
 void ADC1_COMP_IRQHandler(void){
 
-	uint32_t localAdcValue = ADC1->DR; //take value
+	// Takes new value (that triggers this interrupt)
+	uint32_t localAdcValue = ADC1->DR;
 	adcNewValueFlag = 1;
 
-	if (localAdcValue < POT_ADC_MIN){ //if at fluctuating low point, make minimum
+	// Adjusts value if near lowest value
+	if (localAdcValue < POT_ADC_MIN){
 		localAdcValue = POT_ADC_MIN;
 	}
 
+	// Latest ADC Value is then passed on by GetAdcValue()
 	latestAdcValue = localAdcValue;
 
 	ADC1->ISR |= (1 << 2); //clear the interrupt flag
@@ -618,8 +449,15 @@ void ADC1_COMP_IRQHandler(void){
 
 }
 
+//=============================
+// Function: GetAdcValue
+// Purpose:  Averages recent values, then maps as POT only goes to ~80
+//
+// - adjusts minimum to help with linear mapping later
+//=============================
 void GetAdcValue(void){
 
+	// "flag" means it will only take in a value after each ADC interrupt
 	if (!adcNewValueFlag) return;
 	adcNewValueFlag = 1;
 
@@ -629,7 +467,7 @@ void GetAdcValue(void){
 	// Move to next index, wrapping around at the end (circular buffer)
 	adcHistoryIndex = (adcHistoryIndex + 1) % ADC_AVG_WINDOW;
 
-	// Calculate average of the 10 stored values
+	// Calculate average of the stored values
 	uint32_t sum = 0;
 	for(uint8_t i = 0; i < ADC_AVG_WINDOW; i++) {
 		sum += adcHistory[i];
@@ -639,44 +477,17 @@ void GetAdcValue(void){
 	// Map averaged result to desired range
 	adcValue = LinearMap(averagedValue,POT_ADC_MIN,POT_ADC_MAX,0,POT_ADC_MAX);
 
-
-	//RILEY's NOTE, potential EXTRA FOR SERVO, a DEADBAND to stop servo jitter.
-
 }
 
+//=============================
+// Function: InitAdcHistory
+// Purpose:  Sets average, not entirely needed at current small average window.
+//=============================
 void InitAdcHistory(void) {
     // Fill the history buffer with the first valid ADC value
     for (uint8_t i = 0; i < ADC_AVG_WINDOW; i++) {
         adcHistory[i] = latestAdcValue;
     }
-}
-
-void configure_LCD(void){
-	MX_I2C1_Init(); // CubeMX-generated
-
-	lcd1.hi2c = &hi2c1;
-	lcd1.address = 0x27 << 1;  // (confirm your backpack's address, usually 0x27 or 0x3F)
-	lcd_init(&lcd1);
-	lcd_clear(&lcd1);
-}
-
-void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin) {
-
-    // 1. Enable GPIO clock (based on port address offset from GPIOA)
-
-    uint32_t portIndex = ((uint32_t)port - (uint32_t)GPIOA) / 0x400;
-    RCC->IOPENR |= (1 << portIndex);
-
-    // 2. Set pin as general purpose output (MODER = 01)
-
-    port->MODER &= ~(3 << (pin * 2)); // clear mode bits
-    port->MODER |=  (1 << (pin * 2)); // set to output mode
-
-    // 3. Set push-pull, low speed, no pull
-
-    port->OTYPER &= ~(1 << pin);      // push-pull
-    port->OSPEEDR &= ~(3 << (pin * 2)); // low speed
-    port->PUPDR &= ~(3 << (pin * 2)); // no pull-up/down
 }
 
 void ConfigureAdc(void){
@@ -716,6 +527,242 @@ void ConfigureAdc(void){
 	NVIC_EnableIRQ(ADC1_COMP_IRQn);
 
 	ADC1->CR |= 1 << 2; // Start first conversion
+}
+
+/* ==========================================
+ * 					Outputs
+ * 				(LCD, UART, LEDs)
+ * ========================================== */
+
+//=============================
+// Function: OutputLCD
+// Purpose:  Update the LCD display only when text changes.
+//
+// - Compares new text lines with the previous ones to prevent unnecessary updates.
+// - Updates the LCD only when either line has changed.
+// - Prevents flickering by avoiding redundant clears and writes.
+//=============================
+void OutputLCD(const char* line1, const char* line2) {
+
+	static char prevLine1[17] = "";
+	static char prevLine2[17] = "";
+
+	//CounterFlag(LCD_COUNTER, LCD_REFRESH_PERIOD);
+
+	//if(!counterFlag[LCD_COUNTER]) return; //prevents endless refresh
+
+	//counterFlag[LCD_COUNTER] = 0;
+
+	if(!isTimeReached(LCD_COUNTER, LCD_REFRESH_PERIOD)) return;
+
+	// Only update if lines changed
+	// This prevents needless clearing, which shows as flickering.
+
+	if (strcmp(line1, prevLine1) == 0 && strcmp(line2, prevLine2) == 0){
+		return; // no new data, skip the update
+	}
+
+    lcd_clear(&lcd1);
+
+    lcd_gotoxy(&lcd1, 0, 0);
+    lcd_puts(&lcd1, line1);
+
+    lcd_gotoxy(&lcd1, 0, 1);
+    lcd_puts(&lcd1, line2);
+
+    // Save new lines as previous for next comparison
+	strncpy(prevLine1, line1, sizeof(prevLine1));
+	strncpy(prevLine2, line2, sizeof(prevLine2));
+}
+
+//=============================
+// Function: configure_LCD
+// Purpose:  Correctly configures LCD
+//=============================
+void configure_LCD(void){
+	MX_I2C1_Init(); // CubeMX-generated
+
+	lcd1.hi2c = &hi2c1;
+	lcd1.address = 0x27 << 1;  // (confirm your backpack's address, usually 0x27 or 0x3F)
+	lcd_init(&lcd1);
+	lcd_clear(&lcd1);
+}
+
+//=============================
+// Function: UartSendAdcMessageIfEnabled
+// Purpose:  Transmit message with ADC Reading at 2Hz.
+//
+// - Only transmits when enabled.
+// - doesn't consider state, written only in STATE_A functionality.
+//=============================
+void UartSendAdcMessageIfEnabled(void){
+
+	// Exit if update period is not reached
+	if(!isTimeReached(UART_COUNTER,UART_UPDATE_PERIOD)) return;
+
+	// Exit immediately if transmission is disabled
+	if(!isTransmitting) return;
+
+	char messageWithAdc [100]; // Buffer for the message
+
+	// Create the message with current ADC value
+	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %lu\r\n", adcValue);
+
+	// Transmit the message over UART2
+	if(HAL_UART_Transmit(&huart2, (uint8_t*)messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
+		 Error_Handler();
+}
+
+//=============================
+// Function: ServoMove
+// Purpose:  Move the servo to a position based on ADC value.
+//
+// - Maps ADC value to pulse width and sets PWM duty cycle.
+//=============================
+void ServoMove(void){
+
+	// Exit if update period is not reached
+	if(!isTimeReached(SERVO_COUNTER,SERVO_REFRESH_PERIOD)) return;
+
+	// SERVO PULSE WIDTH LIMITS (tested values)
+	const int32_t pulseMin = 610; // 0 degrees, ~0.61ms
+	const int32_t pulseMax = 2600; // 180 degrees, ~2.6ms
+
+	// Map ADC value to servo pulse width
+	pwm_val = LinearMap(adcValue, 0, POT_ADC_MAX, pulseMin, pulseMax);
+
+	// Set new PWM
+	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
+}
+
+//=============================
+// Function: AltLedBlinking
+// Purpose:  Alternates which led is blinking based on button press value.
+//
+// - To be placed outside of state switches, as leds turn off within.
+//=============================
+void AltLedBlinking(void){
+
+	const int32_t blinkPeriodMs = 1000; // 1 second total period
+
+	if (!altLedFlag) return;
+	altLedFlag = 0;
+
+	// If not in STATE_B, turn both LEDs off and exit
+	if (currentState != STATE_B){
+		GPIOB->BSRR = (1 << (LED1_PIN + 16));
+		GPIOB->BSRR = (1 << (LED2_PIN + 16));
+		return;
+	}
+
+	// Takes value from Button Press to determine which LED
+
+	ledOn = selectedLed;
+	ledOff = (selectedLed == 0) ? 1 : 0;  // removes potential error
+
+	// Turn OFF the "off" LED (always)
+	GPIOB->BSRR = (1 << (ledBitPos[ledOff] + 16));
+
+	// Decide whether to turn ON or OFF the "on" LED based on counter position
+	if (counterSelection[ALT_LED_COUNTER] > blinkPeriodMs / 2 ){ //LED ON
+		GPIOB->BSRR = (1 << ledBitPos[ledOn]);
+		blink = 1;
+	} else {
+		GPIOB->BSRR = (1 << (ledBitPos[ledOn] + 16)); //LED OFF
+		blink = 0;
+	}
+
+	// Keep counter rolling over
+	counterSelection[ALT_LED_COUNTER] = counterSelection[ALT_LED_COUNTER] % blinkPeriodMs;
+}
+
+//=============================
+// Function: AdcLedBlinking
+// Purpose:  Varies toggling led via ADC value.
+//
+// - To be placed outside of state switches, as led turns off within.
+//=============================
+void AdcLedBlinking(void){
+
+	// Maps adcValue to determine blinking period
+	variableBlinkingFrequency = LinearMap(adcValue,0,POT_ADC_MAX,200,1000);
+
+	// If not in STATE_B, turn LED off and exit
+	if (currentState != STATE_B){
+		//GPIOB->BSRR = (1 << (LED3_PIN + 16)); //LED blinks off
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET); // Turn OFF
+		return;
+	}
+
+	// Exit if half of new blinking period is not reached
+	if(!isTimeReached(ADC_LED_COUNTER,variableBlinkingFrequency/2)) return;
+	GPIOB->BSRR = (1 << GPIO_PIN_3);
+
+	// Toggle LED
+	if (adcLedState){ // Currently ON, so turn OFF
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
+		adcLedState = 0;
+	} else { // Currently OFF, so turn ON
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+		adcLedState = 1;
+	}
+
+}
+
+/* ==========================================
+ * 			GPIO, EXTI, Timer Config
+ *
+ * ========================================== */
+
+void ConfigureTxForUart(void) {
+    if (pa2CurrentMode == PA2_MODE_UART) return; // already UART, skip
+
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // De-init PA2 (TX) and PA3 (RX)
+
+    MX_USART2_UART_Init(); // CubeMX USART2 init — now PA2/PA3
+
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
+
+    pa2CurrentMode = PA2_MODE_UART;
+}
+
+void ConfigureTxForGpio(void) {
+    if (pa2CurrentMode == PA2_MODE_GPIO) return; // already GPIO, skip
+
+    HAL_UART_DeInit(&huart2);  // Disable USART2 — PA2/PA3 freed
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    pa2CurrentMode = PA2_MODE_GPIO;
+}
+
+
+
+
+void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin) {
+
+    // 1. Enable GPIO clock (based on port address offset from GPIOA)
+
+    uint32_t portIndex = ((uint32_t)port - (uint32_t)GPIOA) / 0x400;
+    RCC->IOPENR |= (1 << portIndex);
+
+    // 2. Set pin as general purpose output (MODER = 01)
+
+    port->MODER &= ~(3 << (pin * 2)); // clear mode bits
+    port->MODER |=  (1 << (pin * 2)); // set to output mode
+
+    // 3. Set push-pull, low speed, no pull
+
+    port->OTYPER &= ~(1 << pin);      // push-pull
+    port->OSPEEDR &= ~(3 << (pin * 2)); // low speed
+    port->PUPDR &= ~(3 << (pin * 2)); // no pull-up/down
 }
 
 void ConfigureButtonEXTI(void) {
@@ -775,6 +822,32 @@ void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
 	tim->CR1 &= ~TIM_CR1_DIR; // Upcounting
 	tim->CR1 |= TIM_CR1_CEN;
 }
+
+/* ==========================================
+ * 		Interrupt Handlers & System Init
+ *
+ * ========================================== */
+
+
+//=============================
+// Interrupt: TIM2 Handler
+// Purpose:  Increments all counters at 1ms.
+//
+// - also sets 1ms flag for faster functions.
+//=============================
+void TIM2_IRQHandler(void){
+    TIM2->SR &= ~TIM_SR_UIF; // Clear update interrupt flag
+
+    //Increments all counters (6 currently)
+    for (int i = 0; i < NUM_COUNTERS; i++) {
+		counterSelection[i]++;
+	}
+
+	altLedFlag = 1;
+}
+
+
+
 
 void InitAll(){
 
@@ -844,6 +917,11 @@ int main(void)
   while (1){
 
 	  GetAdcValue(); // Averaged out value.
+
+	  //acts in all states (including setting to off)
+	  AltLedBlinking();
+	  AdcLedBlinking();
+
 
 	  switch (currentState){
 
