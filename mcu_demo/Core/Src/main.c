@@ -43,10 +43,10 @@ typedef enum {
 }  SystemState;
 
 typedef enum {
-    PC4_MODE_UNKNOWN,
-    PC4_MODE_UART,
-    PC4_MODE_GPIO
-} Pc4Mode;
+    PA2_MODE_UNKNOWN,
+    PA2_MODE_UART,
+    PA2_MODE_GPIO
+} Pa2Mode;
 
 /* USER CODE END PTD */
 
@@ -60,14 +60,6 @@ typedef enum {
 
 // TX PA_2 (USART2_TX)
 // RX PA_15 (USART2_RX)
-
-/* *************
- *  LCD (I2C)
- * *************
- */
-// SDA = PB_7
-// SCL = PB_6
-#define LCD_REFRESH_PERIOD 50 //ms
 
 /* *********
  *  ALL LEDs
@@ -103,9 +95,20 @@ typedef enum {
 #define POT_PORT GPIOA
 #define POT_PIN 0
 
-#define ADC_AVG_WINDOW 30  // Average the last 10 values only
+#define ADC_AVG_WINDOW 3  // Average the last 10 values only
 #define POT_ADC_MAX 4095
 #define POT_ADC_MIN 80 //Potentiometer doesn't reach zero, so this is for linear mapping.
+
+// SERVO PWM_CH1 is assigned to PA_6 in HAL. PA_6 is D12 in CN9
+#define SERVO_REFRESH_PERIOD 1 //ms
+
+/* *************
+ *  LCD (I2C)
+ * *************
+ */
+// SDA = PB_7, D
+// SCL = PB_6
+#define LCD_REFRESH_PERIOD 50 //ms
 
 /* USER CODE END PD */
 
@@ -153,7 +156,6 @@ volatile uint32_t ledDone = 0;        // Flag when 3 flashes complete
 
 //for code review
 volatile int32_t activity = 3; //start on 3, can edit in live expressions
-volatile int32_t Potcounter = 0;
 volatile int32_t hal_delay = 1;
 
 //potentiometer
@@ -167,17 +169,19 @@ volatile uint32_t variableBlinkingFrequency = 0; //for led3
 volatile uint32_t led3counter = 0;
 
 //for servo, 47 as minimum is explained below
-volatile int32_t pwm_val = 470; //for activity 2 sweeping!
+volatile int32_t pwm_val = 0; //for activity 2 sweeping!
 volatile int32_t direction = 0; // to be treated as boolean
 
 volatile int32_t counter_test = 0;
+volatile int8_t servoFlag = 0;
+volatile int32_t servoCounter = 0;
 
 
 /**************************
  *** ALL UART VARIABLES ***
  **************************/
 volatile uint32_t uartEnabled = 1;
-volatile Pc4Mode pc4CurrentMode = PC4_MODE_UNKNOWN;
+volatile Pa2Mode pa2CurrentMode = PA2_MODE_UNKNOWN;
 
 //transmit data variable
 volatile char txData [] = "Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX\r\n";
@@ -221,6 +225,8 @@ void HandleStateC(void);
 void ConfigureTxForUart(void);
 void ConfigureTxForGpio(void);
 
+void ServoMove(void);
+
 uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax,
 		uint32_t outMin, uint32_t outMax);
 
@@ -244,7 +250,7 @@ uint8_t ButtonWasPressed(uint8_t buttonIndex){
 	return 0; // No new press
 }
 
-void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
+void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin, uint32_t bug){
     if (isFalling) {
         buttonState[button] = 1;  // Button is now pressed
         EXTI->FPR1 = (1 << pin);   // Clear falling edge flag
@@ -252,15 +258,16 @@ void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
         buttonState[button] = 0;  // Button is now released
         EXTI->RPR1 = (1 << pin);   // Clear rising edge flag
     }
+    debugCounter[bug]++;
 }
 
 void EXTI4_15_IRQHandler(void){
 
-    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13);
-    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13);
+    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13, 0);
+    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13, 1);
 
-    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4);
-    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4);
+    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4, 2);
+    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4, 3);
 }
 
 /* ****************************
@@ -284,32 +291,32 @@ void TransmitWithADC(void){
 }
 
 void ConfigureTxForUart(void) {
-    if (pc4CurrentMode == PC4_MODE_UART) return; // already UART, skip
+    if (pa2CurrentMode == PA2_MODE_UART) return; // already UART, skip
 
-    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_4);  // Release PC4 from any previous GPIO mode
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // Release PA2 and PA3 from any previous GPIO mode
 
-    MX_USART2_UART_Init(); // CubeMX-generated USART1 initializer (re-init UART and PC4 alternate function)
+    MX_USART2_UART_Init(); // CubeMX-generated USART2 initializer (re-init UART on PA2 and PA3)
 
     __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
 
-    pc4CurrentMode = PC4_MODE_UART;
+    pa2CurrentMode = PA2_MODE_UART;
 }
 
 void ConfigureTxForGpio(void) {
-    if (pc4CurrentMode == PC4_MODE_GPIO) return; // already GPIO, skip
+    if (pa2CurrentMode == PA2_MODE_GPIO) return; // already GPIO, skip
 
-    HAL_UART_DeInit(&huart2);  // Disable UART, free PC4
+    HAL_UART_DeInit(&huart2);  // Disable UART, free PA2 and PA3
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 
-    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    pc4CurrentMode = PC4_MODE_GPIO;
+    pa2CurrentMode = PA2_MODE_GPIO;
 }
 
 /* **************************
@@ -317,7 +324,21 @@ void ConfigureTxForGpio(void) {
  * **************************/
 
 void OutputLCD(const char* line1, const char* line2) {
-	if(!lcdUpdateFlag)return; //prevents endless refresh
+
+	static char prevLine1[17] = "";
+	static char prevLine2[17] = "";
+
+	if(!lcdUpdateFlag) return; //prevents endless refresh
+
+	lcdUpdateFlag = 0;
+
+	// Only update if lines changed
+	// This prevents needless clearing, which shows as flickering.
+
+	if (strcmp(line1, prevLine1) == 0 && strcmp(line2, prevLine2) == 0){
+		return; // no new data, skip the update
+	}
+
     lcd_clear(&lcd1);
 
     lcd_gotoxy(&lcd1, 0, 0);
@@ -325,7 +346,10 @@ void OutputLCD(const char* line1, const char* line2) {
 
     lcd_gotoxy(&lcd1, 0, 1);
     lcd_puts(&lcd1, line2);
-    lcdUpdateFlag = 0;
+
+    // Save new lines as previous for next comparison
+	strncpy(prevLine1, line1, sizeof(prevLine1));
+	strncpy(prevLine2, line2, sizeof(prevLine2));
 }
 
 /* ****************************
@@ -342,7 +366,7 @@ void HandleStateA(void) {
 	OutputLCD("SID: 14057208", "MECHATRONICS 1");
 
 	// UART Receiving (only in State A)
-	HAL_UART_Receive_IT(&huart2, rxData, sizeof(rxData));
+	HAL_UART_Receive_IT(&huart2, (uint8_t*)rxData, sizeof(rxData));
 	// UART Transmitting
 	TransmitWithADC();
 
@@ -409,32 +433,23 @@ void HandleStateC(void) {
 
 void ServoMove(void){
 
-	//HAVE A FLAG FOR TIMING HOW OFTEN THE SERVO IS ALLOWED TO RECIEVE A NEW COMMAND
+	//check if its time to update the servo
+	if (!servoFlag) return;
+	servoFlag = 0;
 
 	//RILEY's NOTE, these DUTY CYCLE UPPER AND LOWER
 	// are what exactly work for 180 degrees on my own SERVO, we don't need to alter them
 	// if it's showing up weirdly on your own servo.
 
-	 // SERVO PULSE WIDTH LIMITS (tested)
+	 // SERVO PULSE WIDTH LIMITS (to test again)
 	 const int32_t serv_min = 610; // 0 degrees, ~0.61ms
 	 const int32_t serv_max = 2600; // 180 degrees, ~2.6ms
 
-	 pwm_val = LinearMap(adcValue,POT_ADC_MAX,0,serv_min,serv_max);
+	 // Map ADC value to servo pulse width
+	 pwm_val = LinearMap(adcValue, 0, POT_ADC_MAX, serv_min, serv_max);
 
-	 // Safety if values end up beyond
-	 if (pwm_val < serv_min) pwm_val = serv_min;
-	 if (pwm_val > serv_max) pwm_val = serv_max;
-
-	 //time for servo to react to new input
-	 Potcounter++;
-
-	 /* HAL_TIM_SET_COMPARE, setting CCR to the new PWM duty cycle value
-	  * Set the TIM Capture Compare Register value on runtime
-	  * without calling another time ConfigChannel function
-	  */
-	 //RILEY's DEBUG, this needs to be called (along with most of WHILE LOOP) in TIM3 Handler for servo functionality.
+	 // Update the PWM duty cycle (CCR value)
 	 __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
-
 }
 /*LINEAR MAPPING
  * this exists for the input ADC value to be mapped to the
@@ -462,6 +477,17 @@ void TIM2_IRQHandler(void){
 		lcdUpdateFlag = 1;
 		lcdCounter = 0;
 	}
+
+	/* ***********************
+	 * SERVO Counter for Refresh
+	 * ***********************
+	 */
+	servoCounter++;
+	if (servoCounter > SERVO_REFRESH_PERIOD -1){
+		servoFlag = 1;
+		servoCounter = 0;
+	}
+
 
 	/* *****************************
 	 * UART Counter for Transmission
@@ -547,21 +573,6 @@ void TIM2_IRQHandler(void){
     // Reset counter when full period completes
 	counter[0] = (counter[0] + 1) % period;
 }
-
-/*
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-	  if (htim->Instance == TIM2){
-		  // Toggle GPIO Pin Using HAL Libraries.
-		  if (activity == 3){
-			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
-		  }
-		  else {
-			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8,GPIO_PIN_RESET);
-		  }
-	  }
-	  counter_test++;
-}
-*/
 
 
 /* *********************************
@@ -760,6 +771,10 @@ void InitAll(){
 	// TIM
 	ConfigureTimer(TIM2, 16 - 1, 1000 - 1, TIM2_IRQn, 3); //All LEDs
 	//TIM3 for servo done in .ioc
+	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+
+	//LCD Config
+	configure_LCD();
 }
 
 /* USER CODE END 0 */
@@ -1020,21 +1035,33 @@ static void MX_USART2_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
-
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin : PA0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* Configure PB8 as I2C1_SCL */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;  // Open-drain for I2C
+  GPIO_InitStruct.Pull = GPIO_PULLUP;      // Optional: internal pull-up (most backpacks have external)
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF6_I2C1;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* Configure PB9 as I2C1_SDA */
+  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
