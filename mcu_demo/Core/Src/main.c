@@ -68,7 +68,7 @@ typedef enum {
 #define LED1_PIN 4 //CN9_D5
 #define LED2_PIN 5 //CN9_D4
 #define LED3_PIN 3 //CN9_D3
-#define LED4_PIN 10 //CN9_D2
+#define LED4_PIN 2 //CN8_PA2 (TX PIN)
 #define BUTTON1_PIN 4 //OFFBOARD PC_4, CN9_D1, CN10_ aligned with CN9's TX/D1
 #define BUTTON2_PIN	13 //ONBOARD, PC_13, CN7 aligned with gap in CN8 and CN6
 #define POT_PIN 0 //PA_0
@@ -185,9 +185,9 @@ static void MX_TIM3_Init(void);
 
 // --- General Utilities ---
 uint8_t ButtonWasPressed(uint8_t buttonIndex);
-void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin);
+void HandleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin);
 void EXTI4_15_IRQHandler(void);
-int isTimeReached(int8_t selection, int32_t reset);
+int IsTimeReached(int8_t selection, int32_t reset);
 uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax,
 		uint32_t outMin, uint32_t outMax);
 
@@ -209,7 +209,7 @@ void UartSendAdcMessageIfEnabled(void);
 void ServoMove(void);
 void AltLedBlinking(void);
 void AdcLedBlinking(void);
-void stateCLed(void);
+void StateCLed(void);
 
 // --- GPIO, EXTI, Timer Config ---
 void ConfigureTxForUart(void);
@@ -234,10 +234,12 @@ void InitAll(void);
  * 				General Utilities
  * 		 (Buttons and General Functions)
  * ========================================== */
-
-// This function is called when button PRESS matters,
-// not button being HELD.
-// For swapping between states.
+//=============================
+// Function ButtonWasPressed
+// Purpose: Function used when PRESS matters, not holding down button.
+//
+// - Used for swapping between state A and B
+//=============================
 uint8_t ButtonWasPressed(uint8_t buttonIndex){
 	if (buttonState[buttonIndex]) {
 		buttonState[buttonIndex] = 0; //clears press flag
@@ -246,7 +248,13 @@ uint8_t ButtonWasPressed(uint8_t buttonIndex){
 	return 0; // No new press
 }
 
-void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
+//=============================
+// Function HandleButtonInterrupt
+// Purpose:  Changes corresponding button state.
+//
+// - Importantly clears relevant flag.
+//=============================
+void HandleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
     if (isFalling) {
         buttonState[button] = 1;  // Button is now pressed
         EXTI->FPR1 = (1 << pin);   // Clear falling edge flag
@@ -256,23 +264,28 @@ void handleButtonInterrupt(uint8_t button, uint8_t isFalling, uint32_t pin){
     }
 }
 
+//=============================
+// Interrupt: EXTI4_15_IRQHandler
+// Purpose:  Responds to rising and falling edge of both buttons
+//=============================
+
 void EXTI4_15_IRQHandler(void){
 
-    if (EXTI->FPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 1, 13);
-    if (EXTI->RPR1 & (1 << 13)) handleButtonInterrupt(BUTTON2, 0, 13);
+    if (EXTI->FPR1 & (1 << 13)) HandleButtonInterrupt(BUTTON2, 1, 13);
+    if (EXTI->RPR1 & (1 << 13)) HandleButtonInterrupt(BUTTON2, 0, 13);
 
-    if (EXTI->FPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 1, 4);
-    if (EXTI->RPR1 & (1 << 4)) handleButtonInterrupt(BUTTON1, 0, 4);
+    if (EXTI->FPR1 & (1 << 4)) HandleButtonInterrupt(BUTTON1, 1, 4);
+    if (EXTI->RPR1 & (1 << 4)) HandleButtonInterrupt(BUTTON1, 0, 4);
 }
 
 //=============================
-// Function: isTimeReached
+// Function: IsTimeReached
 // Purpose:  Returns 1 ("true") if a time period has elapsed.
 //
 // - Polls a counter incremented in TIM2_IRQHandler (1ms steps).
 // - Used for scheduling periodic tasks without blocking delays.
 //=============================
-int isTimeReached(int8_t selection, int32_t reset){
+int IsTimeReached(int8_t selection, int32_t reset){
 
 	// If counter has reached desired period
     if (counterSelection[selection] >= reset) {
@@ -305,11 +318,18 @@ uint32_t LinearMap(uint32_t x, uint32_t inMin, uint32_t inMax, uint32_t outMin, 
  * 				 State Machine
  * 		 	 (for switch in while)
  * ========================================== */
-
+//=============================
+// Function: HandleStateA
+// Purpose:  Calls State A specific functions.
+//
+// - Configures Tx for UART, LCD Output, Reads UART
+// - Button 1 pressed -> State C
+// - Button 2 pressed -> State B
+//=============================
 void HandleStateA(void) {
 
 	// UART Transmitting
-	//ConfigureTxForUart();
+	ConfigureTxForUart();
 	UartSendAdcMessageIfEnabled();
 
 	// LCD STATE A
@@ -329,6 +349,14 @@ void HandleStateA(void) {
     }
 }
 
+//=============================
+// Function: HandleStateB
+// Purpose:  Calls State B specific functions.
+//
+// - Takes ADC value for LED_3, Servo and LCD
+// - Button 1 pressed -> Alternates LED 1 & LED 2 blinking
+// - Button 2 pressed -> State A
+//=============================
 void HandleStateB(void) {
 
 
@@ -352,43 +380,54 @@ void HandleStateB(void) {
     }
 }
 
+//=============================
+// Function: HandleStateC
+// Purpose:  Calls State C specific functions.
+//
+// - LCD "off"
+// - Runs LED blinking function (also handles TX reconfiguration)
+//=============================
 void HandleStateC(void) {
-	//ConfigureTxForGpio(); //UART OFF
 
 	OutputLCD("", ""); //LCD functionally OFF
 
-	stateCLed();
+	StateCLed();
 
 }
 
-void stateCLed(void){
+//=============================
+// Function: stateCLed
+// Purpose:  Blink LED_4 at 1Hz for 3 cycles (6 toggles).
+//
+// - Reconfigures TX pin as GPIO at start
+// - Blinks LED 3 times
+// - Reverts to State A when complete
+//=============================
+void StateCLed(void){
 
 	if (!stateCStarted) {
 		stateCStarted = 1;
 		stateCFlashCount = 0;
-		//ConfigureTxForGpio();  // Switch PA2 to GPIO
+		ConfigureTxForGpio(); //UART OFF
 		counterSelection[STATEC_LED_COUNTER] = 0; // Reset timing counter
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET); // LED OFF
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET); // LED OFF
 	}
 
 	// 1Hz blink timing
-	if (!isTimeReached(STATEC_LED_COUNTER, 1000/2)) return;
-
-	// Toggle PA2
-	//HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_2);
+	if (!IsTimeReached(STATEC_LED_COUNTER, 1000/2)) return;
 
 	// Toggle LED
 	if (stateCFlashCount % 2 == 0){ // Currently ON, so turn OFF
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);
 	} else { // Currently OFF, so turn ON
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
 	}
 
 	stateCFlashCount++;
 
 	if (stateCFlashCount >= (LED_BLINK_AMOUNT*2)) { // 3 ON + 3 OFF = 6 toggles
 		//ConfigureTxForUart(); // Restore UART
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET); // LED OFF
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET); // LED OFF
 		stateCStarted = 0;
 		currentState = STATE_A;
 	}
@@ -530,7 +569,7 @@ void OutputLCD(const char* line1, const char* line2) {
 
 	//counterFlag[LCD_COUNTER] = 0;
 
-	if(!isTimeReached(LCD_COUNTER, LCD_REFRESH_PERIOD)) return;
+	if(!IsTimeReached(LCD_COUNTER, LCD_REFRESH_PERIOD)) return;
 
 	// Only update if lines changed
 	// This prevents needless clearing, which shows as flickering.
@@ -575,7 +614,7 @@ void configure_LCD(void){
 void UartSendAdcMessageIfEnabled(void){
 
 	// Exit if update period is not reached
-	if(!isTimeReached(UART_COUNTER,UART_UPDATE_PERIOD)) return;
+	if(!IsTimeReached(UART_COUNTER,UART_UPDATE_PERIOD)) return;
 
 	// Exit immediately if transmission is disabled
 	if(!isTransmitting) return;
@@ -599,7 +638,7 @@ void UartSendAdcMessageIfEnabled(void){
 void ServoMove(void){
 
 	// Exit if update period is not reached
-	if(!isTimeReached(SERVO_COUNTER,SERVO_REFRESH_PERIOD)) return;
+	if(!IsTimeReached(SERVO_COUNTER,SERVO_REFRESH_PERIOD)) return;
 
 	// SERVO PULSE WIDTH LIMITS (tested values)
 	const int32_t pulseMin = 610; // 0 degrees, ~0.61ms
@@ -672,7 +711,7 @@ void AdcLedBlinking(void){
 	}
 
 	// Exit if half of new blinking period is not reached
-	if(!isTimeReached(ADC_LED_COUNTER,variableBlinkingFrequency/2)) return;
+	if(!IsTimeReached(ADC_LED_COUNTER,variableBlinkingFrequency/2)) return;
 	GPIOB->BSRR = (1 << GPIO_PIN_3);
 
 	// Toggle LED
@@ -692,32 +731,49 @@ void AdcLedBlinking(void){
  * ========================================== */
 
 void ConfigureTxForUart(void) {
-    if (pa2CurrentMode == PA2_MODE_UART) return; // already UART, skip
+    if (pa2CurrentMode == PA2_MODE_UART) return; // Already UART? Exit
 
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);  // De-init PA2 (TX) and PA3 (RX)
+    // Disable UART interrupts before reconfiguring
+    __HAL_UART_DISABLE_IT(&huart2, UART_IT_RXNE);
 
-    MX_USART2_UART_Init(); // CubeMX USART2 init — now PA2/PA3
+    // Deinitialise PA2 only (leave PA3 untouched)
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2);
 
-    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE); // Enable RX interrupt
+    // Make sure no UART is still transmitting before re-init
+	while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET);
+
+	// Re-initialize UART. This will reassign PA2 (TX).
+	// PA3 (RX) stays as is.
+    MX_USART2_UART_Init();
+
+    __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
 
     pa2CurrentMode = PA2_MODE_UART;
 }
 
 void ConfigureTxForGpio(void) {
-    if (pa2CurrentMode == PA2_MODE_GPIO) return; // already GPIO, skip
+    if (pa2CurrentMode == PA2_MODE_GPIO) return; // Already GPIO? Exit
 
-    HAL_UART_DeInit(&huart2);  // Disable USART2 — PA2/PA3 freed
+    // Disable UART interrupts before de-init
+	__HAL_UART_DISABLE_IT(&huart2, UART_IT_RXNE);
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	// Make sure UART is not transmitting
+	while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET);
 
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	// Disable UART. PA2 will be free, PA3 stays input.
+	HAL_UART_DeInit(&huart2);
 
-    pa2CurrentMode = PA2_MODE_GPIO;
+	// Configure PA2 as output. PA3 left unchanged (still RX, floating).
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	GPIO_InitStruct.Pin = GPIO_PIN_2;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	pa2CurrentMode = PA2_MODE_GPIO;
 }
 
 
