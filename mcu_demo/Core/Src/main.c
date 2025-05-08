@@ -48,7 +48,7 @@ typedef enum {
 	UART_COUNTER = 2,
 	ALT_LED_COUNTER = 3,
 	ADC_LED_COUNTER = 4,
-	STATE_C_COUNTER = 5
+	STATEC_LED_COUNTER = 5
 }  counterArray;
 
 typedef enum {
@@ -64,66 +64,47 @@ typedef enum {
 
 #define NUM_COUNTERS 6
 
-/* *************
- *  USART (TX/RX)
- * *************
- */
-
-// TX PA_2 (USART2_TX)
-// RX PA_15 (USART2_RX)
-
-/* *********
- *  ALL LEDs
- * *********
- */
-#define LED1_PORT GPIOB
+// --- PINS ---
 #define LED1_PIN 4 //CN9_D5
-#define LED2_PORT GPIOB
 #define LED2_PIN 5 //CN9_D4
-#define LED3_PORT GPIOB
 #define LED3_PIN 3 //CN9_D3
-#define LED4_PORT GPIOB
-#define LED4_PIN 2 //CN10, in alignment with CN9_D8
-
-/* *********
- *  BUTTONS
- * *********
- */
+#define LED4_PIN 10 //CN9_D2
 #define BUTTON1_PIN 4 //OFFBOARD PC_4, CN9_D1, CN10_ aligned with CN9's TX/D1
 #define BUTTON2_PIN	13 //ONBOARD, PC_13, CN7 aligned with gap in CN8 and CN6
+#define POT_PIN 0 //PA_0
+
+// SDA = PB_8, D14
+// SCL = PB_9, D15
+
+// --- PORTS ---
+#define LED1_PORT GPIOB
+#define LED2_PORT GPIOB
+#define LED3_PORT GPIOB
+#define LED4_PORT GPIOA
+#define POT_PORT GPIOA
+
+
+// --- DEFINED VALUES ---
 #define BUTTON1 0
 #define BUTTON2 1
 
-/* *********
- *  TIMERS
- * *********/
-#define TIMER_SEL TIM2
-#define TIMER_IRQn TIM2_IRQn
-
-/* *********
- *  ADC POT
- * *********/
-#define POT_PORT GPIOA
-#define POT_PIN 0
-
-#define ADC_AVG_WINDOW 3  // Average the last 10 values only
 #define POT_ADC_MAX 4095
 #define POT_ADC_MIN 80 //Potentiometer doesn't reach zero, so this is for linear mapping.
 
-// SERVO PWM_CH1 is assigned to PA_6 in HAL. PA_6 is D12 in CN9
-#define SERVO_REFRESH_PERIOD 1 //ms
+#define ADC_AVG_WINDOW 3  // Average the last 10 values only
 
-/* *************
- *  LCD (I2C)
- * *************
- */
-// SDA = PB_7, D
-// SCL = PB_6
-#define LCD_REFRESH_PERIOD 50 //ms
+// --- TIM CONFIG ---
+#define TIMER_SEL TIM2
+#define TIMER_IRQn TIM2_IRQn
 
+// --- COUNTER PERIODS ---
+#define LCD_REFRESH_PERIOD 100 //ms
 #define UART_UPDATE_PERIOD 500 //ms
-
 #define ALT_LEDS_PERIOD 1000 //ms
+#define SERVO_REFRESH_PERIOD 1 //ms, variable with testing
+
+// --- STATE C ---
+#define LED_BLINK_AMOUNT 3
 
 /* USER CODE END PD */
 
@@ -142,64 +123,45 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 I2C_LCD_HandleTypeDef lcd1;
 
+// --- Debugging ---
+volatile uint32_t debugCounter[4] = {0}; //used to confirm if points in code are reached.
+
+// --- State machine ---
 volatile SystemState currentState = STATE_A;
+
+// --- Counters ---
+//TIM2 Handler Counters, for non blocking functionality
 volatile uint32_t counterSelection[NUM_COUNTERS] = {0};  // LCD, SERVO, UART, ALT_LED, ADC_LED, STATE_C
 
+//--- Alternating LEDs (LED1 & LED2) ---
 volatile uint32_t ledBitPos[2] = {LED1_PIN,LED2_PIN};
+volatile uint32_t selectedLed = 0;
+volatile uint32_t ledOn = 0; //this is selecting LED_1 for ledBitPos to begin
+volatile uint32_t ledOff = 1; //this is selecting LED_2 for ledBitPos to begin
+volatile uint32_t blink = 0;
+volatile int8_t altLedFlag = 0; //1ms check based on TIM2
 
-volatile uint32_t counter[2] = {0};
-
-volatile uint32_t debugCounter[4] = {0};
-volatile uint32_t debugEXTIcr3 = 0;
-volatile uint32_t lastDebounceTime = 0;
-
-volatile uint32_t lastPressTime[2] = {0,0};
-volatile uint32_t lastReleaseTime[2] = {0,0};
-const uint32_t debounceDelay = 30; //ms
+// --- Button ---
 volatile uint32_t buttonState[2]= {0};
 
-volatile uint32_t selectedLed = 0;
-volatile uint32_t ledOn = 0;
-volatile uint32_t ledOff = 1;
-volatile uint32_t blink = 0;
-
-volatile uint32_t adcLedState = 0;
+//--- POTENTIOMETER GET ADC ---
 volatile uint32_t adcValue = 0;
-
-volatile uint32_t cState = 0;       // 0 = OFF, 1 = ON
-volatile uint32_t ledBlinkCounter = 0;  // Count OFF states (each full flash = 1)
-volatile uint32_t ledDone = 0;        // Flag when 3 flashes complete
-
-//for code review
-volatile int32_t activity = 3; //start on 3, can edit in live expressions
-volatile int32_t hal_delay = 1;
-
-//potentiometer
-
 volatile int32_t latestAdcValue = 0;
 volatile int32_t adcNewValueFlag = 0;
 volatile uint32_t adcHistory[ADC_AVG_WINDOW] = {0};  // Stores the last 10 readings
 volatile uint8_t adcHistoryIndex = 0;  // Tracks where to insert the new value
 
-volatile uint32_t variableBlinkingFrequency = 0; //for ADC LED 3
+//--- Implementing ADC ---
+//-- Servo
+volatile int32_t pwmValue = 0;
+//-- ADC LED (LED_3)
+volatile uint32_t adcLedState = 0;
+volatile uint32_t variableBlinkingFrequency = 0;
 
-//for servo, 47 as minimum is explained below
-volatile int32_t pwm_val = 0; //for activity 2 sweeping!
-volatile int32_t direction = 0; // to be treated as boolean
-
-volatile int32_t counter_test = 0;
-volatile int8_t servoFlag = 0;
-volatile int32_t servoCounter = 0;
-volatile int8_t altLedFlag = 0;
-
-
-/**************************
- *** ALL UART VARIABLES ***
- **************************/
+//--- UART ---
 volatile uint32_t uartEnabled = 1;
 volatile Pa2Mode pa2CurrentMode = PA2_MODE_UNKNOWN;
 
-//transmit data variable
 volatile char txData [] = "Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX\r\n";
 volatile char rxData [] = "";
 
@@ -207,12 +169,9 @@ volatile int32_t isTransmitting = 1;
 volatile int32_t uartCounter = 0;
 volatile int8_t uartTransmitFlag = 0;
 
-/*************************
- *** ALL LCD VARIABLES ***
- *************************/
-
-volatile int8_t lcdUpdateFlag = 0;
-volatile int32_t lcdCounter = 0;
+//--- STATE C ---
+volatile uint32_t stateCStarted = 0;
+volatile uint32_t stateCFlashCount = 0;     // Counts OFF states (full flash = 1)
 
 /* USER CODE END PV */
 
@@ -250,6 +209,7 @@ void UartSendAdcMessageIfEnabled(void);
 void ServoMove(void);
 void AltLedBlinking(void);
 void AdcLedBlinking(void);
+void stateCLed(void);
 
 // --- GPIO, EXTI, Timer Config ---
 void ConfigureTxForUart(void);
@@ -365,7 +325,6 @@ void HandleStateA(void) {
 	}
     if (ButtonWasPressed(BUTTON2)) {
         currentState = STATE_B;
-        counter[0] = 0;
         return;
     }
 }
@@ -394,28 +353,46 @@ void HandleStateB(void) {
 }
 
 void HandleStateC(void) {
-	 static uint8_t started = 0;
+	//ConfigureTxForGpio(); //UART OFF
 
-	 //ConfigureTxForGpio(); //UART OFF
+	OutputLCD("", ""); //LCD functionally OFF
 
-	 OutputLCD("", ""); //LCD
+	stateCLed();
 
-	if (!started) {
-		started = 1;
-		cState = 0;
-		ledBlinkCounter = 0;
-		ledDone = 0;
+}
 
-		LED3_PORT->BSRR = (1 << (LED3_PIN + 16)); // Ensure LED3 OFF
+void stateCLed(void){
+
+	if (!stateCStarted) {
+		stateCStarted = 1;
+		stateCFlashCount = 0;
+		//ConfigureTxForGpio();  // Switch PA2 to GPIO
+		counterSelection[STATEC_LED_COUNTER] = 0; // Reset timing counter
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET); // LED OFF
 	}
 
-	if (ledDone) {
-		started = 0;
+	// 1Hz blink timing
+	if (!isTimeReached(STATEC_LED_COUNTER, 1000/2)) return;
+
+	// Toggle PA2
+	//HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_2);
+
+	// Toggle LED
+	if (stateCFlashCount % 2 == 0){ // Currently ON, so turn OFF
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_SET);
+	} else { // Currently OFF, so turn ON
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET);
+	}
+
+	stateCFlashCount++;
+
+	if (stateCFlashCount >= (LED_BLINK_AMOUNT*2)) { // 3 ON + 3 OFF = 6 toggles
+		//ConfigureTxForUart(); // Restore UART
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET); // LED OFF
+		stateCStarted = 0;
 		currentState = STATE_A;
 	}
 
-
-	///ALL MAJOR UART TO BE DONE HERE
 }
 
 /* ==========================================
@@ -629,10 +606,10 @@ void ServoMove(void){
 	const int32_t pulseMax = 2600; // 180 degrees, ~2.6ms
 
 	// Map ADC value to servo pulse width
-	pwm_val = LinearMap(adcValue, 0, POT_ADC_MAX, pulseMin, pulseMax);
+	pwmValue = LinearMap(adcValue, 0, POT_ADC_MAX, pulseMin, pulseMax);
 
 	// Set new PWM
-	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm_val);
+	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwmValue);
 }
 
 //=============================
@@ -645,7 +622,7 @@ void AltLedBlinking(void){
 
 	const int32_t blinkPeriodMs = 1000; // 1 second total period
 
-	if (!altLedFlag) return;
+	if (!altLedFlag) return; //this varies as it's only a 1ms check
 	altLedFlag = 0;
 
 	// If not in STATE_B, turn both LEDs off and exit
@@ -838,12 +815,12 @@ void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
 void TIM2_IRQHandler(void){
     TIM2->SR &= ~TIM_SR_UIF; // Clear update interrupt flag
 
-    //Increments all counters (6 currently)
+    //Increments all counters
     for (int i = 0; i < NUM_COUNTERS; i++) {
 		counterSelection[i]++;
 	}
 
-	altLedFlag = 1;
+	altLedFlag = 1; //1ms check for alternating LEDs
 }
 
 
@@ -855,6 +832,7 @@ void InitAll(){
 	ConfigureGpioOutput(LED1_PORT, LED1_PIN); // LED1
 	ConfigureGpioOutput(LED2_PORT, LED2_PIN); // LED2
 	ConfigureGpioOutput(LED3_PORT, LED3_PIN); // LED3
+	ConfigureGpioOutput(LED4_PORT, LED4_PIN); // LED4
 
 	// EXTI lines
 	ConfigureButtonEXTI();
