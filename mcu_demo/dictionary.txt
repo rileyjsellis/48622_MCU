@@ -17,3 +17,6 @@ datasheet
 riley
 unmask
 onboard
+leds
+smooths
+deinitialisedeinitialise
