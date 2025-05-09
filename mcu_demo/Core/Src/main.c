@@ -21,8 +21,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
-//errors were reached without these, they are used within lcd and uart functionality.
 #include <stdio.h>
 #include <string.h>
 #include "i2c_lcd.h"
@@ -106,6 +104,10 @@ typedef enum {
 // --- STATE C ---
 #define LED_BLINK_AMOUNT 3
 
+
+//LCD
+#define LCD_REFRESH_PERIOD 50 //ms
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -173,6 +175,29 @@ volatile int8_t uartTransmitFlag = 0;
 volatile uint32_t stateCStarted = 0;
 volatile uint32_t stateCFlashCount = 0;     // Counts OFF states (full flash = 1)
 
+/***********************
+ *  ALL UART VARIABLES
+ ***********************
+ */
+volatile Pc4Mode pc4CurrentMode = PC4_MODE_UNKNOWN;
+
+//transmit data variable
+volatile char txData [] = "Autumn2025 MX1 SID: 14057208, ADC Reading: XXXX\r\n";
+volatile char rxData [] = "";
+
+volatile int32_t isTransmitting = 1;
+volatile int32_t uartCounter = 0;
+volatile int8_t uartTransmitFlag = 0;
+
+
+/***********************
+ *  ALL LCD VARIABLES
+ ***********************
+ */
+
+volatile int8_t lcdUpdateFlag = 0;
+volatile int32_t lcdCounter = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -216,7 +241,7 @@ void ConfigureTxForUart(void);
 void ConfigureTxForGpio(void);
 void ConfigureGpioOutput(GPIO_TypeDef* port, uint32_t pin);
 void ConfigureButtonEXTI(void);
-void ConfigureTimer(TIM_TypeDef *tim, uint32_t prescaler,
+void ConfigureTimer(TIM_TypeDef* tim, uint32_t prescaler,
 		uint32_t arr, IRQn_Type irqNum, uint8_t priority);
 
 // --- Interrupt Handlers ---
@@ -246,6 +271,36 @@ uint8_t ButtonWasPressed(uint8_t buttonIndex){
 		return 1; //returns TRUE, recent button press HAS occurred.
 	}
 	return 0; // No new press
+}
+//FOR STATE A UART
+void TransmitWithADC(void){
+	char messageWithAdc [100];
+	if (!uartTransmitFlag) return; //immediate exit if no transmission
+
+	sprintf(messageWithAdc, "Autumn2025 EMS SID: 14057208, ADC Reading: %lu\r\n", adcValue);
+
+	if(HAL_UART_Transmit(&huart2, (uint8_t*)messageWithAdc, strlen(messageWithAdc), HAL_MAX_DELAY) != HAL_OK)
+		 Error_Handler();
+	//Riley's note:
+	// 'uint8_t*) included to remove warning. signedness differed.
+	// removed warning without changing variable type.
+
+	uartTransmitFlag = 0; //clear flag after successful transmit
+
+}
+
+////LCD Functionality
+
+void OutputLCD(const char* line1, const char* line2) {
+	if(!lcdUpdateFlag)return; //prevents endless refresh
+    lcd_clear(&lcd1);
+
+    lcd_gotoxy(&lcd1, 0, 0);
+    lcd_puts(&lcd1, line1);
+
+    lcd_gotoxy(&lcd1, 0, 1);
+    lcd_puts(&lcd1, line2);
+    lcdUpdateFlag = 0;
 }
 
 //=============================
@@ -358,7 +413,6 @@ void HandleStateA(void) {
 // - Button 2 pressed -> State A
 //=============================
 void HandleStateB(void) {
-
 
 	ServoMove();
 
@@ -949,7 +1003,6 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1){
-
 	  GetAdcValue(); // Averaged out value.
 
 	  //acts in all states (including setting to off)
